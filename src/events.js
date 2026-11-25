@@ -1,4 +1,6 @@
 // Switch substitutions / cards on or off: removes or re-inserts their keyframes and fixes the players and times around them.
+import { benchFor } from './simulation.js';
+
 const newId = (D) => Math.max(0, ...D.kfs.map((k) => k.id ?? 0)) + 1;
 const num = (id) => +id.slice(1);
 
@@ -28,12 +30,12 @@ export function setEvents(D, kind, on) {
     ['subs', 'ph', 'goalFor', 'og', 'htSubs', 'instant'].forEach((x) => delete kf[x]);
     Object.assign(kf, { id: newId(D), t: +(prev.t + dur).toFixed(1), minute: e.m, hold: null, ev: kind, evId: e.id });
     if (kind === 'sub') {
-      kf.field='full';kf.subs=[];kf.isolation='substitution';kf.subDuration=kf.subDuration||2.4;kf.movements={};kf.hold=null;delete kf.ballMovement;
+      kf.field = new Set(e.swaps.map((s) => s.k)).size > 1 ? 'full' : (e.swaps[0].k === 'A' ? 'home' : 'away');
       e.swaps.forEach((s) => {
-        const T=s.k,oi=s.o,ni=s.i,bench=[60.5,52.5+(kf.subs.length*2)];
-        kf[T][oi]=[...bench];kf[T][ni]=[58.5,58.5+(kf.subs.length*2)];
-        kf.movements[T+oi]={start:[...(prev[T]?.[oi]||bench)],end:[...bench],duration:1.8,type:'benchExit',benchPoint:[60.5,52.5]};
-        kf.movements[T+ni]={start:[60.5,52.5],end:[...(kf[T]?.[ni]||[58.5,58.5])],duration:1.8,type:'benchEntry',benchPoint:[60.5,52.5]};
+        const T=s.k,oi=s.o,ni=s.i,bench=benchFor(T,kf.sw,kf.subs.length),spot=[...(prev[T]?.[oi]||[34,52.5])];
+        kf[T][oi]=[...bench];kf[T][ni]=[...spot];
+        kf.movements[T+oi]={start:[...spot],end:[...bench],duration:1.8,type:'benchExit',benchPoint:[...bench]};
+        kf.movements[T+ni]={start:[...bench],end:[...spot],duration:1.8,type:'benchEntry',benchPoint:[...bench]};
         const P=D.teams[T].players;P[oi].leave=kf.id;P[ni].join=kf.id;kf.subs.push({o:T+oi,i:T+ni,k:T});
       });
       kf.actor=kf.subs[0].i;kf.comment={type:'sub',text:e.text};

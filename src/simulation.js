@@ -12,6 +12,9 @@ export const FORMATIONS = {
 export const clampPitch = ([x,y]) => [Math.max(3,Math.min(65,x)),Math.max(3,Math.min(102,y))];
 export const RIGHT_BENCH_POINT = Object.freeze([60.5,52.5]);
 export const benchPoint = () => [...RIGHT_BENCH_POINT];
+// bench = on the halfway line, a few metres inside the team's OWN half (so it is visible in half view too)
+export const benchFor = (team, sw, n = 0) => [RIGHT_BENCH_POINT[0], 52.5 + (((team === 'A') !== !!sw) ? -1 : 1) * (4 + 3 * n)];
+export const subField = (team) => (team === 'A' ? 'home' : 'away'); // camera on the half where that team plays (also correct after the HT swap)
 export const mirrorPitch = ([x,y]) => [PITCH.width-x,PITCH.length-y];
 
 export function halfKey(t, minute) {
@@ -72,12 +75,11 @@ export function ensureMovementMeta(kf, prev, D) {
   }
   if (kf.subs?.length) {
     kf.subs.forEach((sub) => {
-      const outgoing = sub.o;
-      const team = outgoing[0], index = +outgoing.slice(1);
-      const start = prev[team]?.[index] ? [...prev[team][index]] : [...(kf[team]?.[index] || RIGHT_BENCH_POINT)];
-      kf.movements[outgoing] = { start, end: benchPoint(), duration:+(kf.t-prev.t).toFixed(1), type:'benchExit', benchPoint:benchPoint() };
-      kf.manual = kf.manual || {};
-      kf.manual.modified = true;
+      if (kf.movements[sub.o]?.type === 'benchExit' && kf.movements[sub.i]?.type === 'benchEntry') return; // keep what exists
+      const team = sub.o[0], oi = +sub.o.slice(1);
+      const bench = benchFor(team, kf.sw), spot = [...(prev[team]?.[oi] || kf[team]?.[oi] || [34, 52.5])], d = +(kf.subDuration || 1.8);
+      kf.movements[sub.o] = { start: spot, end: bench, duration: d, type: 'benchExit', benchPoint: bench };
+      kf.movements[sub.i] = { start: [...bench], end: [...spot], duration: d, type: 'benchEntry', benchPoint: [...bench] };
     });
   }
   if (!kf.ballMovement) kf.ballMovement={start:[...(prev.ball||[34,52.5])],end:[...(kf.ball||[34,52.5])],type:kf.hold?'dribble':(kf.comment?.type==='pass'?'pass':'free')};

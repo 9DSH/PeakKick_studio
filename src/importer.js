@@ -1,7 +1,7 @@
 
 // Real match import (API-Football). Calls go through the Vite dev-server proxy (see vite.config.js).
 import { cl } from './engine.js';
-
+import { benchFor, subField } from './simulation.js';
 // Passing simulation tuning
 const PASS = {
   goalPasses: 4,
@@ -983,137 +983,34 @@ export function buildMatch(fx, lineups, events, stats) {
 
     } else if (e.type === 'subst') {
       const swaps = [e];
-
-      while (
-        evs[g + 1] &&
-        evs[g + 1].type === 'subst' &&
-        evs[g + 1].m === e.m &&
-        !htEvs.includes(evs[g + 1])
-      ) {
-        swaps.push(evs[++g]);
-      }
-
-      const pos = copy();
-      const made = [];
-      const text = [];
-
+      while (evs[g + 1] && evs[g + 1].type === 'subst' && evs[g + 1].m === e.m && !htEvs.includes(evs[g + 1])) swaps.push(evs[++g]);
+      const pos = copy(), made = [], text = [], mv = [];
       swaps.forEach((s) => {
-        const [sk, oi] = who(s);
-        const ni = idx[sk][s.assist?.id];
-
+        const [sk, oi] = who(s), ni = idx[sk][s.assist?.id];
         if (oi == null || ni == null) return;
-
-        const bench = [60.5, 52.5];
-
-        const outgoing = [
-          bench[0],
-          bench[1] + (made.length * 2)
-        ];
-
-        pos[sk][oi] = [...outgoing];
-
-        pos[sk][ni] = [
-          58.5,
-          58.5 + (made.length * 2)
-        ];
-
-        base[sk][ni] = [...base[sk][oi]];
-        base[sk][oi] = toBase(outgoing);
-
-        made.push({
-          k: sk,
-          o: oi,
-          i: ni
-        });
-
-        text.push(
-          `${pname(sk, ni)} for ${pname(sk, oi)}`
-        );
+        const spot = [...pos[sk][oi]];                                               // where the player going off stands; the substitute takes this spot
+        const bench = benchFor(sk, swapped, made.filter((m) => m.k === sk).length);  // own half of that team, correct after the HT swap
+        pos[sk][oi] = [...bench]; pos[sk][ni] = [...spot];
+        base[sk][ni] = toBase(spot); base[sk][oi] = toBase(bench);
+        made.push({ k: sk, o: oi, i: ni }); mv.push({ spot, bench });
+        text.push(`${pname(sk, ni)} for ${pname(sk, oi)}`);
       });
-
       if (!made.length) continue;
-
-      made.forEach((s) => {
-        active[s.k] = active[s.k].map(
-          (x) => (x === s.o ? s.i : x)
-        );
-
-        if (gk[s.k] === s.o) {
-          gk[s.k] = s.i;
-        }
+      made.forEach((s) => { active[s.k] = active[s.k].map((x) => (x === s.o ? s.i : x)); if (gk[s.k] === s.o) gk[s.k] = s.i; });
+      const id = 's' + evList.length, txt = text.join(', ').slice(0, 110);
+      evList.push({ id, kind: 'sub', m: e.m, h: hh, swaps: made, text: txt });
+      const oneTeam = new Set(made.map((s) => s.k)).size === 1;
+      const kf = K(1.8, e.m, oneTeam ? subField(made[0].k) : 'full', pos, {
+        ev: 'sub', evId: id, subDuration: 1.8, isolation: 'substitution',
+        subAfter: { incoming: P(made[0].k, made[0].i), outgoing: P(made[0].k, made[0].o) },
+        movements: {}, subs: made.map((s) => ({ o: P(s.k, s.o), i: P(s.k, s.i) })),
+        actor: P(made[0].k, made[0].i), comment: { type: 'sub', text: txt }
       });
-
-      const id = 's' + evList.length;
-
-      const txt = text.join(', ').slice(0, 110);
-
-      evList.push({
-        id,
-        kind: 'sub',
-        m: e.m,
-        h: hh,
-        swaps: made,
-        text: txt
-      });
-
-      const kf = K(1.8, e.m, 'full', pos, {
-        ev: 'sub',
-        evId: id,
-        subDuration: 1.8,
-        isolation: 'substitution',
-
-        subAfter: made.length
-          ? {
-              incoming: P(made[0].k, made[0].i),
-              outgoing: P(made[0].k, made[0].o)
-            }
-          : null,
-
-        movements: {},
-
-        subs: made.map((s) => ({
-          o: P(s.k, s.o),
-          i: P(s.k, s.i)
-        })),
-
-        actor: P(made[0].k, made[0].i),
-
-        comment: {
-          type: 'sub',
-          text: txt
-        }
-      });
-
-      kf.movements = {};
-
-      made.forEach((s) => {
-        const outgoing = P(s.k, s.o);
-        const incoming = P(s.k, s.i);
-
-        const start = [
-          ...(copy()[s.k][s.o] || [34, 52.5])
-        ];
-
-        kf.movements[outgoing] = {
-          start,
-          end: [60.5, 52.5],
-          duration: 1.8,
-          type: 'benchExit',
-          benchPoint: [60.5, 52.5]
-        };
-
-        kf.movements[incoming] = {
-          start: [60.5, 52.5],
-          end: [
-            ...(pos[s.k][s.i] || [58.5, 58.5])
-          ],
-          duration: 1.8,
-          type: 'benchEntry',
-          benchPoint: [60.5, 52.5]
-        };
-
-        teams[s.k].players[s.o].leave = kf.id;
-        teams[s.k].players[s.i].join = kf.id;
+      made.forEach((s, n) => {
+        const { spot, bench } = mv[n];
+        kf.movements[P(s.k, s.o)] = { start: [...spot], end: [...bench], duration: 1.8, type: 'benchExit', benchPoint: [...bench] };   // off: spot -> bench
+        kf.movements[P(s.k, s.i)] = { start: [...bench], end: [...spot], duration: 1.8, type: 'benchEntry', benchPoint: [...bench] };  // on: bench -> spot
+        teams[s.k].players[s.o].leave = kf.id; teams[s.k].players[s.i].join = kf.id;
       });
     }
   }

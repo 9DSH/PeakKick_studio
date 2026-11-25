@@ -2,8 +2,7 @@ import { useState } from 'react';
 import { cl, dflt, normalize, EVENT_TYPES } from './engine.js';
 import { listFixtures, loadMatch } from './importer.js';
 import { setEvents } from './events.js';
-import { FORMATIONS, setTeamFormation, mirrorPitch, movementStats, RIGHT_BENCH_POINT } from './simulation.js';
-
+import { FORMATIONS, setTeamFormation, mirrorPitch, movementStats, ensureMovementMeta, benchFor, subField } from './simulation.js';
 // Resize an uploaded photo to max 256px and return a small data URL.
 const readPhoto = (file, png) => new Promise((res) => {
   const im = new Image(), u = URL.createObjectURL(file);
@@ -101,14 +100,16 @@ ${noPhotos(D)}`;
         {kfSub==='players'&&<><Section title="Manual substitution"><div className="f"><label>Team<select value={subTeam} onChange={(e)=>{setSubTeam(e.target.value);setSubOut(0);setSubIn(0)}}><option value="A">Home</option><option value="B">Away</option></select></label><label>Outgoing player<select value={subOut} onChange={(e)=>setSubOut(+e.target.value)}>{D.teams[subTeam].players.map((p,i)=> <option key={i} value={i}>OUT · #{p.n||i+1} {p.name||`Player ${i+1}`}</option>)}</select></label><label>Incoming player<select value={subIn} onChange={(e)=>setSubIn(+e.target.value)}>{D.teams[subTeam].players.map((p,i)=> <option key={i} value={i}>IN · #{p.n||i+1} {p.name||`Player ${i+1}`}</option>)}</select></label></div><label className="hint">Substitution duration (seconds)<input type="range" min="0.6" max="5" step="0.1" value={kf.subDuration||2.4} onChange={(e)=>K(f=>{const duration=+e.target.value;f.subDuration=duration;if(f.movements)Object.values(f.movements).forEach(m=>m.duration=duration)})}/><small>{(kf.subDuration||2.4).toFixed(1)} s</small></label>
 <button className="pri" onClick={()=>K(f=>{
   const out=subTeam+subOut, inPlayer=subTeam+subIn, prev=D.kfs[sel-1];
+  const bench=benchFor(subTeam,f.sw), spot=[...(prev?.[subTeam]?.[subOut]||f[subTeam][subOut])];
   f.subs=[{o:out,i:inPlayer,k:subTeam}]; f.ev='sub'; f.isolation='substitution'; f.actor=inPlayer; f.subDuration=f.subDuration||2.4;
-  f.movements={}; delete f.ballMovement;
-  if(prev){
-    f.movements[out]={start:[...(prev[subTeam]?.[subOut]||f[subTeam]?.[subOut]||[34,52.5])],end:[60.5,52.5],duration:f.subDuration,type:'benchExit',benchPoint:[60.5,52.5]};
-    f.movements[inPlayer]={start:[60.5,52.5],end:[...(f[subTeam]?.[subIn]||[60.5,52.5])],duration:f.subDuration,type:'benchEntry',benchPoint:[60.5,52.5]};
-  }
+  f.field=subField(subTeam); f.hold=null; delete f.ballMovement;   // camera on the half where this team plays
+  f[subTeam][subOut]=[...bench]; f[subTeam][subIn]=[...spot];
+  f.movements={
+    [out]:{start:[...spot],end:[...bench],duration:f.subDuration,type:'benchExit',benchPoint:[...bench]},
+    [inPlayer]:{start:[...bench],end:[...spot],duration:f.subDuration,type:'benchEntry',benchPoint:[...bench]}
+  };
   f.comment={type:'sub',text:`Substitution: ${D.teams[subTeam].players[subIn]?.name||'#'+D.teams[subTeam].players[subIn]?.n||'Player'} enters for ${D.teams[subTeam].players[subOut]?.name||'#'+D.teams[subTeam].players[subOut]?.n||'Player'}`};
-  f.hidden=(f.hidden||[]).filter(id=>id!==inPlayer); f.hidden=[...new Set([...(f.hidden||[]).filter(id=>id!==out),out])];
+  f.hidden=[...new Set([...(f.hidden||[]).filter(id=>id!==inPlayer&&id!==out),out])];
   f.subAfter={incoming:inPlayer,outgoing:out};
   f.manual={modified:true,source:'manual'};
 })}>Generate substitution paths</button></Section><Section title="Players in this keyframe">{['A','B'].map(team=><div key={team}><small className="hint">{team==='A'?D.teams.A.name:D.teams.B.name}</small>{D.teams[team].players.map((p,i)=>{const id=team+i;const present=kf.hidden?.includes(id)?false:(p.join==='never'?false:true);return <label className="prow row" key={id}><input type="checkbox" checked={present} onChange={(e)=>K(f=>{f.hidden=f.hidden||[];if(e.target.checked)f.hidden=f.hidden.filter(x=>x!==id);else f.hidden=[...new Set([...f.hidden,id])];f.manual={modified:true,source:'manual'}})}/><b>#{p.n}</b><span className="nm">{p.name||`Player ${i+1}`}</span><button onClick={()=>setSe(id)}>Edit</button></label>})}</div>)}<p className="hint">Checked = in this keyframe only. Uncheck a player to remove him from this event/scene. Use Edit to place him, and use the checkbox again to restore him.</p><div className="r"><button onClick={()=>K(f=>{delete f.hidden;f.manual={modified:true,source:'manual'}})}>Show all players</button></div></Section></>}

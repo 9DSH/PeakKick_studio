@@ -567,10 +567,10 @@ const rnd = (i) => {
 
 // Draw a substitution notification card.
 // Used by both normal substitutions and half-time substitutions.
-function subCard(ctx, D, subs) {
+function subCard(ctx, D, subs, y0 = FIELD_TOP + 60) {
   if (!subs?.length) return;
   const P = (id) => (!id || !D.teams[id[0]] ? {} : D.teams[id[0]].players[+id.slice(1)] || {});
-  const n = Math.min(4, subs.length), y0 = FIELD_TOP + 60;
+  const n = Math.min(4, subs.length);
   ctx.save(); ctx.globalAlpha = .96; panel(ctx, 140, y0, 800, 64 + 40 * n); ctx.restore();
   tx(ctx, '\ud83d\udd01  SUBSTITUTION' + (n > 1 ? 'S' : ''), 540, y0 + 26, 26, '#00e5ff', 'center', 800);
   subs.slice(0, 4).forEach((s, i) => {
@@ -579,102 +579,49 @@ function subCard(ctx, D, subs) {
     tx(ctx, `\u25bc ${out.name || 'Player'} #${out.n ?? ''}`, 560, y, 30, '#ff5d5d', 'left', 700);
   });
 }
+
 function subFx(ctx, D, v, t, edit, sel) {
-  // Half-time substitutions:
-  // They are stored in `htSubs` on the second-half kickoff keyframe.
-  // No bench movement or player animation is drawn for these substitutions.
+  // Half-time substitutions: only the notification card, no bench and no movement.
   const hk = edit
     ? (D.kfs[sel]?.htSubs?.length ? D.kfs[sel] : null)
-    : [...D.kfs].reverse().find((f) =>
-        f.htSubs?.length &&
-        t >= f.t &&
-        t < f.t + 3
-      );
+    : [...D.kfs].reverse().find((f) => f.htSubs?.length && t >= f.t && t < f.t + 3);
+  if (hk) { subCard(ctx, D, hk.htSubs); return; }
 
-  if (hk) {
-    subCard(ctx, D, hk.htSubs);
-    return;
-  }
-
-  // Normal in-game substitutions retain their movement animation.
-  const k = edit
-    ? D.kfs[sel]
-    : [...D.kfs].reverse().find((f) =>
-        f.subs?.length &&
-        t >= f.t &&
-        t < f.t + 2.4
-      );
-
+  const k = edit ? D.kfs[sel] : [...D.kfs].reverse().find((f) => f.subs?.length && t >= f.t && t < f.t + 2.4);
   if (!k?.subs?.length) return;
 
-  const pulse = 6 * (1 + Math.sin(t * 9));
-  const P = (id) => {
-    if (!id || !D.teams[id[0]]) return {};
-    return D.teams[id[0]].players[+id.slice(1)] || {};
-  };
-
-  const tt = edit ? k.t : t;
-  const bench = proj(v, RIGHT_BENCH_POINT);
-
-  // Bench marker.
-  ctx.save();
-  ctx.setLineDash([10, 10]);
-  ctx.strokeStyle = '#bde8f2';
-  ctx.lineWidth = 5;
-  ctx.beginPath();
-  ctx.arc(bench[0], bench[1], 34 * v.k, 0, 7);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.restore();
-
-  tx(ctx, 'BENCH', bench[0], bench[1] - 42 * v.k, 22, '#bde8f2', 'center', 800);
+  const pulse = 6 * (1 + Math.sin(t * 9)), tt = edit ? k.t : t;
+  const P = (id) => (!id || !D.teams[id[0]] ? {} : D.teams[id[0]].players[+id.slice(1)] || {});
 
   k.subs.forEach((s) => {
+    const bw = k.movements?.[s.o]?.benchPoint || RIGHT_BENCH_POINT, bench = proj(v, bw);
+    ctx.save(); ctx.setLineDash([10, 10]); ctx.strokeStyle = '#bde8f2'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(bench[0], bench[1], 34 * v.k, 0, 7); ctx.stroke(); ctx.restore();
+    tx(ctx, 'BENCH', bench[0], bench[1] - 42 * v.k, 22, '#bde8f2', 'center', 800);
+
     [['i', '\u25b2 ON', '#3ddc84'], ['o', '\u25bc OFF', '#ff5d5d']].forEach(([key, lab, c]) => {
-      const playerId = key === 'o' ? s.o : s.i;
-      const m = k.movements?.[playerId];
-      const duration = m?.duration || k.subDuration || 2.4;
+      const playerId = key === 'o' ? s.o : s.i, m = k.movements?.[playerId], duration = m?.duration || k.subDuration || 2.4;
+      const u = edit ? 1 : cl(t - k.t, 0, duration) / duration, eased = u * u * (3 - 2 * u);
+      const world = m?.start && m?.end
+        ? [m.start[0] + (m.end[0] - m.start[0]) * eased, m.start[1] + (m.end[1] - m.start[1]) * eased]
+        : (key === 'o' ? bw : pos(D, s.i, tt));
+      const p = P(playerId), q = proj(v, world), r = 27 * (p.size || 1) * v.k;
 
-      const elapsed = edit ? duration : cl(t - k.t, 0, duration);
-      const u = edit ? 1 : elapsed / duration;
-      const eased = u * u * (3 - 2 * u);
-
-      let world;
-
-      if (m?.start && m?.end) {
-        world = [
-          m.start[0] + (m.end[0] - m.start[0]) * eased,
-          m.start[1] + (m.end[1] - m.start[1]) * eased
-        ];
-      } else {
-        world = key === 'o' ? RIGHT_BENCH_POINT : pos(D, s.i, tt);
-      }
-
-      const p = P(playerId);
-      const q = proj(v, world);
-      const r = 27 * (p.size || 1) * v.k;
-
-      ctx.strokeStyle = c;
-      ctx.lineWidth = 7;
-      ctx.beginPath();
-      ctx.arc(q[0], q[1], r + 10 + pulse, 0, 7);
-      ctx.stroke();
-
+      ctx.strokeStyle = c; ctx.lineWidth = 7;
+      ctx.beginPath(); ctx.arc(q[0], q[1], r + 10 + pulse, 0, 7); ctx.stroke();
       tx(ctx, lab, q[0], q[1] - r - 30, 24, c, 'center', 800);
 
-      ctx.save();
-      ctx.setLineDash([14, 12]);
-      ctx.strokeStyle = c + 'aa';
-      ctx.lineWidth = 5;
-      ctx.beginPath();
-      ctx.moveTo(q[0], q[1]);
-      ctx.lineTo(bench[0], bench[1]);
-      ctx.stroke();
-      ctx.restore();
+      if (m?.start && m?.end) { // the path: OFF = spot -> bench, ON = bench -> spot
+        const a = proj(v, m.start), b = proj(v, m.end);
+        ctx.save(); ctx.setLineDash([14, 12]); ctx.strokeStyle = c + 'aa'; ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.restore();
+      }
     });
   });
 
-  subCard(ctx, D, k.subs);
+  // keep the card away from the bench: if the halfway line is at the top of a half view, put the card lower
+  const fld = (edit ? D.kfs[sel] : stAt(D, t)).field;
+  subCard(ctx, D, k.subs, fld !== 'full' && !v.up ? FIELD_TOP + 330 : FIELD_TOP + 60);
 }
 
 export function draw(ctx, D, t, edit, sel, se) {
@@ -750,9 +697,7 @@ export function draw(ctx, D, t, edit, sel, se) {
 
     let al = edit && cur.hidden?.includes(id) ? 0 : presence(D, p, t, edit);
 
-    if (activeSub?.subAfter?.outgoing === id && t > activeSub.t + (+activeSub.subDuration || 2.4)) al = 0;
-    if (activeSub?.subAfter?.incoming === id && t < activeSub.t) al = 0;
-    if (activeSub?.subs?.some((s) => s.i === id) && t >= activeSub.t) al = 1;
+    if (activeSub?.subs?.some((s) => s.i === id || s.o === id)) al = 1;   // both walk at full opacity (the outgoing no longer fades before he reaches the bench)
 
     if (al > 0) {
       dot(ctx, v, pos(D, id, t), p, T.color, edit && se === id, m.showNames, al);
