@@ -25,7 +25,7 @@ export function setEvents(D, kind, on) {
     const lo = e.h === 1 ? 1 : (iH2 > 0 ? iH2 + 1 : 1), hi = e.h === 1 ? (iHT > 0 ? iHT : end) : end;
     let at = hi; for (let j = lo; j < hi; j++) if (k[j].minute > e.m) { at = j; break; }
     const prev = k[at - 1], kf = structuredClone(prev), dur = kind === 'sub' ? 1.8 : 1.5;
-    ['subs', 'ph', 'goalFor', 'og'].forEach((x) => delete kf[x]);
+    ['subs', 'ph', 'goalFor', 'og', 'htSubs', 'instant'].forEach((x) => delete kf[x]);
     Object.assign(kf, { id: newId(D), t: +(prev.t + dur).toFixed(1), minute: e.m, hold: null, ev: kind, evId: e.id });
     if (kind === 'sub') {
       kf.field='full';kf.subs=[];kf.isolation='substitution';kf.subDuration=kf.subDuration||2.4;kf.movements={};kf.hold=null;delete kf.ballMovement;
