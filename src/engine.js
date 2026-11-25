@@ -1,15 +1,35 @@
 // Pure logic: data model, camera views, interpolation, canvas drawing. No React in here.
 // WORLD COORDINATES (metres): x 0-68 across, y 0-105 along the pitch. HOME goal is at y=0, AWAY goal is at y=105. Home attacks up (y=105), Away attacks down (y=0).
 // Team keys: A = Home, B = Away.
-export const W = 1080, H = 1920, OY = 650, HOLD_ANGLE = 45, HOLD_GAP = 3;
+export const W = 1080, H = 1920, HOLD_ANGLE = 45, HOLD_GAP = 3;
+export const SIDE = 50;            // gap left and right of the field (px)
+export const BOTTOM_GAP = 50;      // gap under the field (px). Raise it to keep the field clear of the YouTube Shorts UI
+export const FIELD_TOP = 510;      // where the field starts (just under the commentator box)
+export const FIELD_BOTTOM = H - BOTTOM_GAP;
+export const HALF_STRETCH = 1;  // half view: 1 = half field fills the whole area (width fits, nothing cropped); 0 = no stretching, but a gap is left at the bottom
 export const RIGHT_BENCH_POINT = [60.5, 52.5];
+export const PITCH_STYLE = {
+  //        line thickness | penalty + 6-yard box width | goal frame width | centre circle + "D" arc width
+  full: { line: 1.2, box: 1, goal: 1.2, circle: 1.15 },
+  half: { line: 1.0, box: 1.15, goal: 1.4, circle: 1.65 },
+};
 export const cl = (v, a, b) => Math.max(a, Math.min(b, v));
-const FONT = "'Segoe UI','Helvetica Neue',Arial,sans-serif", S0 = W / 68;
+const FONT = "'Segoe UI','Helvetica Neue',Arial,sans-serif", S0 = (W - 2 * SIDE) / 68;
 
 // ---------- camera: which field is on screen (goal always at the top) ----------
 export const view = (field, fit = 'stretch', sw = false) => {
-  const T = 650, B = 1910, up = (field === 'away') !== !!sw, y0 = field === 'full' || !up ? -2.4 : 52.5, y1 = field === 'full' || up ? 107.4 : 52.5, sy = (B - T) / (y1 - y0), sx = fit === 'crop' ? sy : S0;
-  return { a: sx, d: -sy, e: (W - 68 * sx) / 2, f: T + y1 * sy, k: field === 'full' ? 0.8 : 1, up };
+  const T = FIELD_TOP, B = FIELD_BOTTOM, up = (field === 'away') !== !!sw, half = field !== 'full';
+  let y0 = !half || !up ? -2.4 : 52.5, y1 = !half || up ? 107.4 : 52.5, sx, sy;
+  if (half) { // whole half field, width fits between the 30 px gaps, height fills the area
+    const fill = (B - T) / (y1 - y0);
+    sx = S0; sy = S0 + (fill - S0) * HALF_STRETCH;
+    const ext = (B - T) / sy;              // with HALF_STRETCH = 1 this is exactly the half field
+    if (up) y0 = y1 - ext; else y1 = y0 + ext;
+  } else {
+    const syFill = (B - T) / (y1 - y0);
+    sx = fit === 'crop' ? Math.min(S0, syFill) : S0; sy = fit === 'crop' ? sx : syFill;
+  }
+  return { a: sx, d: -sy, e: (W - 68 * sx) / 2, f: T + y1 * sy, k: field === 'full' ? 0.8 : 1, up, top: T, bot: half ? B : T + (y1 - y0) * sy, y0, y1 };
 };
 export const proj = (v, q) => [v.a * q[0] + v.e, v.d * q[1] + v.f];
 export const unproj = (v, x, y) => [(x - v.e) / v.a, (y - v.f) / v.d];
@@ -237,7 +257,6 @@ export function pos(D, id, t) {
       const elapsed = t - b.t;
       const u = cl(elapsed / duration, 0, 1);
       const eased = u * u * (3 - 2 * u);
-
       const movement = b.movements?.[id];
 
       if (sub.o === id) {
@@ -286,7 +305,6 @@ export function pos(D, id, t) {
 
   return [p[0] + (q[0] - p[0]) * u, p[1] + (q[1] - p[1]) * u];
 }
-
 // ---------- drawing ----------
 const cache = new Map();
 
@@ -331,42 +349,43 @@ function panel(ctx, x, y, w, h, accent = '#22d3ee') {
   ctx.strokeStyle = accent + '99'; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(x, y, w, h, 34); ctx.stroke();
   ctx.fillStyle = accent; ctx.beginPath(); ctx.roundRect(x + w / 2 - 70, y - 2, 140, 6, 3); ctx.fill();
 }
+
 function ui(ctx, D, t) {
   const st = stAt(D, t), TA = D.teams.A, TB = D.teams.B, sc = st.score, s = st.stats, tot = D.kfs.at(-1).t + 1.2;
-  // ---- scoreboard ----
-  panel(ctx, 40, 28, 1000, 410);
-  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(470, 46, 140, 40, 20); ctx.fill(); ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 2; ctx.stroke();
-  tx(ctx, `${Math.floor(minuteAt(D, t))}'`, 540, 67, 26, '#00e5ff', 'center', 800);
-  [[TA, 150], [TB, 930]].forEach(([T, bx]) => { badge(ctx, T, bx, 128); const z = fit(ctx, T.name, 230, 28, 700); tx(ctx, T.name, bx, 196, z, '#fff', 'center', 700); });
-  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(350, 94, 380, 102, 26); ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.lineWidth = 2; ctx.stroke();
-  tx(ctx, String(sc[0]), 445, 148, 88, '#fff', 'center', 800); tx(ctx, ':', 540, 142, 64, '#6f8794', 'center', 700); tx(ctx, String(sc[1]), 635, 148, 88, '#fff', 'center', 800);
+  // ---- scoreboard (compact, y 20 -> 356) ----
+  panel(ctx, 40, 20, 1000, 336);
+  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(480, 32, 120, 34, 17); ctx.fill(); ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 2; ctx.stroke();
+  tx(ctx, `${Math.floor(minuteAt(D, t))}'`, 540, 50, 24, '#00e5ff', 'center', 800);
+  [[TA, 150], [TB, 930]].forEach(([T, bx]) => { badge(ctx, T, bx, 114); const z = fit(ctx, T.name, 230, 26, 700); tx(ctx, T.name, bx, 180, z, '#fff', 'center', 700); });
+  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(350, 74, 380, 88, 24); ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.lineWidth = 2; ctx.stroke();
+  tx(ctx, String(sc[0]), 445, 120, 76, '#fff', 'center', 800); tx(ctx, ':', 540, 115, 56, '#6f8794', 'center', 700); tx(ctx, String(sc[1]), 635, 120, 76, '#fff', 'center', 800);
   const goals = D.kfs.filter((k) => k.comment?.type === 'goal' && k.t <= t + 1e-6 && k.actor);
   [['A', 150], ['B', 930]].forEach(([k, cx]) => {
     const g = goals.filter((x) => (x.goalFor || x.actor[0]) === k).at(-1); if (!g) return;
     const p = D.teams[g.actor[0]]?.players[+g.actor.slice(1)] || {}, label = `\u26bd ${p.name || '#' + p.n}${g.og ? ' (OG)' : ''} ${Math.floor(g.minute)}'`;
-    tx(ctx, label, cx, 228, fit(ctx, label, 270, 22, 700), '#cfe9f0', 'center', 700);
+    tx(ctx, label, cx, 206, fit(ctx, label, 270, 20, 700), '#cfe9f0', 'center', 700);
   });
-  tx(ctx, 'Ball possession' + ({ '1H': ' · 1st half', '2H': ' · 2nd half', FT: ' · Full time' }[st.sl] || ''), 540, 258, 24, '#c3cfd5', 'center', 700);
+  tx(ctx, 'Ball possession' + ({ '1H': ' · 1st half', '2H': ' · 2nd half', FT: ' · Full time' }[st.sl] || ''), 540, 204, 20, '#c3cfd5', 'center', 700);
   const bx0 = 75, bw = 930, hp = cl(s.poss[0] / Math.max(1, s.poss[0] + s.poss[1]), .05, .95);
-  ctx.fillStyle = TA.color; ctx.beginPath(); ctx.roundRect(bx0, 274, bw * hp - 2, 32, 16); ctx.fill();
-  ctx.fillStyle = TB.color; ctx.beginPath(); ctx.roundRect(bx0 + bw * hp + 2, 274, bw * (1 - hp) - 2, 32, 16); ctx.fill();
-  tx(ctx, s.poss[0] + '%', bx0 + 22, 290, 24, ink(TA.color), 'left', 800); tx(ctx, s.poss[1] + '%', bx0 + bw - 22, 290, 24, ink(TB.color), 'right', 800);
+  ctx.fillStyle = TA.color; ctx.beginPath(); ctx.roundRect(bx0, 222, bw * hp - 2, 28, 14); ctx.fill();
+  ctx.fillStyle = TB.color; ctx.beginPath(); ctx.roundRect(bx0 + bw * hp + 2, 222, bw * (1 - hp) - 2, 28, 14); ctx.fill();
+  tx(ctx, s.poss[0] + '%', bx0 + 20, 237, 22, ink(TA.color), 'left', 800); tx(ctx, s.poss[1] + '%', bx0 + bw - 20, 237, 22, ink(TB.color), 'right', 800);
   [['Total shots', 'shots'], ['Shots on target', 'sot'], [D.meta.bigLabel || 'Big chances', 'big']].forEach(([lab, key], i) => {
-    const y = 338 + i * 37, a = s[key][0], b = s[key][1], tt = a + b, wa = tt ? 420 * a / tt : 210;
-    ctx.fillStyle = '#16222a'; ctx.beginPath(); ctx.roundRect(75, y - 16, 930, 32, 16); ctx.fill();
-    tx(ctx, lab, 540, y - 3, 22, '#c3cfd5', 'center', 700); tx(ctx, String(a), 105, y, 26, '#fff', 'left', 800); tx(ctx, String(b), 975, y, 26, '#fff', 'right', 800);
-    ctx.fillStyle = tt ? TA.color : '#34424a'; ctx.fillRect(330, y + 9, wa, 3); ctx.fillStyle = tt ? TB.color : '#34424a'; ctx.fillRect(330 + wa, y + 9, 420 - wa, 3);
+    const y = 276 + i * 28, a = s[key][0], b = s[key][1], tt = a + b, wa = tt ? 420 * a / tt : 210;
+    ctx.fillStyle = '#16222a'; ctx.beginPath(); ctx.roundRect(75, y - 13, 930, 26, 13); ctx.fill();
+    tx(ctx, lab, 540, y - 4, 19, '#c3cfd5', 'center', 700); tx(ctx, String(a), 105, y - 1, 22, '#fff', 'left', 800); tx(ctx, String(b), 975, y - 1, 22, '#fff', 'right', 800);
+    ctx.fillStyle = tt ? TA.color : '#34424a'; ctx.fillRect(330, y + 7, wa, 3); ctx.fillStyle = tt ? TB.color : '#34424a'; ctx.fillRect(330 + wa, y + 7, 420 - wa, 3);
   });
-  // ---- commentator box: title and text centred ----
+  // ---- commentator box (compact, y 368 -> 492): title and text centred ----
   const cm = st.comment || { type: 'info', text: '' }, ev = EV[cm.type] || EV.info, goal = cm.type === 'goal', ac = goal ? '#f5c542' : '#22d3ee';
-  panel(ctx, 40, 452, 1000, 140, ac);
-  const head = `${ev[0]}  ${ev[1]}`; ctx.font = `800 24px ${FONT}`; const hw = ctx.measureText(head).width + 52;
-  ctx.fillStyle = ac + '22'; ctx.beginPath(); ctx.roundRect(540 - hw / 2, 468, hw, 36, 18); ctx.fill(); ctx.strokeStyle = ac + '88'; ctx.lineWidth = 2; ctx.stroke();
-  tx(ctx, head, 540, 487, 24, goal ? '#f5c542' : '#00e5ff', 'center', 800);
-  ctx.font = `600 30px ${FONT}`; const lines = wrap(ctx, cm.text, 880);
-  lines.forEach((l, i) => tx(ctx, l, 540, (lines.length > 1 ? 524 : 540) + i * 32, 30, '#fff', 'center', 600));
-  ctx.fillStyle = '#ffffff22'; ctx.fillRect(95, 574, 890, 6); ctx.fillStyle = ac; ctx.fillRect(95, 574, 890 * cl(t / tot, 0, 1), 6);
-  D.kfs.forEach((k) => { ctx.fillStyle = k.comment?.type === 'goal' ? '#f5c542' : '#ffffffaa'; ctx.beginPath(); ctx.arc(95 + 890 * (k.t / tot), 577, k.comment?.type === 'goal' ? 7 : 4, 0, 7); ctx.fill(); });
+  panel(ctx, 40, 368, 1000, 124, ac);
+  const head = `${ev[0]}  ${ev[1]}`; ctx.font = `800 22px ${FONT}`; const hw = ctx.measureText(head).width + 48;
+  ctx.fillStyle = ac + '22'; ctx.beginPath(); ctx.roundRect(540 - hw / 2, 380, hw, 30, 15); ctx.fill(); ctx.strokeStyle = ac + '88'; ctx.lineWidth = 2; ctx.stroke();
+  tx(ctx, head, 540, 395, 22, goal ? '#f5c542' : '#00e5ff', 'center', 800);
+  ctx.font = `600 26px ${FONT}`; const lines = wrap(ctx, cm.text, 880);
+  lines.forEach((l, i) => tx(ctx, l, 540, (lines.length > 1 ? 436 : 450) + i * 28, 26, '#fff', 'center', 600));
+  ctx.fillStyle = '#ffffff22'; ctx.fillRect(95, 482, 890, 5); ctx.fillStyle = ac; ctx.fillRect(95, 482, 890 * cl(t / tot, 0, 1), 5);
+  D.kfs.forEach((k) => { ctx.fillStyle = k.comment?.type === 'goal' ? '#f5c542' : '#ffffffaa'; ctx.beginPath(); ctx.arc(95 + 890 * (k.t / tot), 484.5, k.comment?.type === 'goal' ? 6 : 3.5, 0, 7); ctx.fill(); });
 }
 
 function wrap(ctx, text, maxW) {
@@ -428,7 +447,10 @@ function badge(ctx, T, cx, cy) {
     tx(ctx, (T.name || '').slice(0, 3).toUpperCase(), cx, cy + 2, 34, ink(T.color), 'center', 800);
   }
 }
+
 function pitch(ctx, v, field) {
+  const S = field === 'full' ? PITCH_STYLE.full : PITCH_STYLE.half;
+
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, '#0f2d33');
   g.addColorStop(.5, '#0f1a21');
@@ -437,10 +459,10 @@ function pitch(ctx, v, field) {
   ctx.fillRect(0, 0, W, H);
 
   ctx.save();
+  ctx.beginPath(); ctx.rect(SIDE, 0, W - 2 * SIDE, H); ctx.clip(); // nothing outside the 30 px side gaps
   ctx.setTransform(v.a, 0, 0, v.d, v.e, v.f);
   const u = 1 / Math.sqrt(Math.abs(v.a * v.d));
-  const y0 = field !== 'full' && v.up ? 52.5 : -3;
-  const y1 = field !== 'full' && !v.up ? 52.5 : 108;
+  const y0 = field === 'full' ? -3 : v.y0, y1 = field === 'full' ? 108 : v.y1;
 
   ctx.beginPath();
   ctx.rect(-2, y0, 72, y1 - y0);
@@ -450,41 +472,48 @@ function pitch(ctx, v, field) {
   ctx.fillRect(0, Math.max(y0, 0), 68, Math.min(y1, 105) - Math.max(y0, 0));
 
   ctx.strokeStyle = 'rgba(255,255,255,.30)';
-  ctx.lineWidth = 5 * u * (v.k < 1 ? 1.4 : 1);
+  ctx.lineWidth = 5 * u * S.line;
   ctx.strokeRect(0, 0, 68, 105);
 
+  // halfway line
   ctx.beginPath();
   ctx.moveTo(0, 52.5);
   ctx.lineTo(68, 52.5);
   ctx.stroke();
 
+  // centre circle
   ctx.beginPath();
-  ctx.arc(34, 52.5, 9.15, 0, 7);
+  ctx.ellipse(34, 52.5, 9.15 * S.circle, 9.15, 0, 0, 7);
   ctx.stroke();
 
   [[0, 1], [105, -1]].forEach(([y, s]) => {
-    ctx.strokeRect(13.84, s > 0 ? 0 : 105 - 16.5, 40.32, 16.5);
-    ctx.strokeRect(24.84, s > 0 ? 0 : 105 - 5.5, 18.32, 5.5);
+    // penalty box and 6-yard box
+    ctx.strokeRect(34 - 20.16 * S.box, s > 0 ? 0 : 105 - 16.5, 40.32 * S.box, 16.5);
+    ctx.strokeRect(34 - 9.16 * S.box, s > 0 ? 0 : 105 - 5.5, 18.32 * S.box, 5.5);
 
+    // penalty "D" arc
     ctx.beginPath();
-    ctx.arc(34, y + s * 11, 9.15, s > 0 ? .645 : -2.497, s > 0 ? 2.497 : -.645);
+    ctx.ellipse(34, y + s * 11, 9.15 * S.circle, 9.15, 0, s > 0 ? .645 : -2.497, s > 0 ? 2.497 : -.645);
     ctx.stroke();
 
+    // penalty spot
     ctx.fillStyle = 'rgba(255,255,255,.4)';
     ctx.beginPath();
     ctx.arc(34, y + s * 11, .4, 0, 7);
     ctx.fill();
 
+    // goal frame
     ctx.strokeStyle = 'rgba(255,255,255,.85)';
-    ctx.lineWidth = 6 * u;
-    ctx.strokeRect(30.34, s > 0 ? -2.4 : 105, 7.32, 2.4);
+    ctx.lineWidth = 6 * u * S.line;
+    ctx.strokeRect(34 - 3.66 * S.goal, s > 0 ? -2.4 : 105, 7.32 * S.goal, 2.4);
+
+    // restore line style for the next side
     ctx.strokeStyle = 'rgba(255,255,255,.30)';
-    ctx.lineWidth = 5 * u * (v.k < 1 ? 1.4 : 1);
+    ctx.lineWidth = 5 * u * S.line;
   });
 
   ctx.restore();
 }
-
 function dot(ctx, v, q, p, color, hi, showName, alpha = 1) {
   const [x, y] = proj(v, q);
   const r = 27 * (p.size || 1) * v.k, im = img(p.photo);
@@ -540,29 +569,16 @@ const rnd = (i) => {
 // Used by both normal substitutions and half-time substitutions.
 function subCard(ctx, D, subs) {
   if (!subs?.length) return;
-
-  const P = (id) => {
-    if (!id || !D.teams[id[0]]) return {};
-    return D.teams[id[0]].players[+id.slice(1)] || {};
-  };
-
-  const n = Math.min(4, subs.length);
-  ctx.save();
-  ctx.globalAlpha = .96;
-  panel(ctx, 140, 716, 800, 64 + 40 * n);
-  ctx.restore();
-
-  tx(ctx, '\ud83d\udd01  SUBSTITUTION' + (n > 1 ? 'S' : ''), 540, 742, 26, '#00e5ff', 'center', 800);
-
+  const P = (id) => (!id || !D.teams[id[0]] ? {} : D.teams[id[0]].players[+id.slice(1)] || {});
+  const n = Math.min(4, subs.length), y0 = FIELD_TOP + 60;
+  ctx.save(); ctx.globalAlpha = .96; panel(ctx, 140, y0, 800, 64 + 40 * n); ctx.restore();
+  tx(ctx, '\ud83d\udd01  SUBSTITUTION' + (n > 1 ? 'S' : ''), 540, y0 + 26, 26, '#00e5ff', 'center', 800);
   subs.slice(0, 4).forEach((s, i) => {
-    const incoming = P(s.i), outgoing = P(s.o);
-    const y = 784 + i * 40;
-
-    tx(ctx, `\u25b2 ${incoming.name || 'Player'} #${incoming.n ?? ''}`, 175, y, 30, '#3ddc84', 'left', 700);
-    tx(ctx, `\u25bc ${outgoing.name || 'Player'} #${outgoing.n ?? ''}`, 560, y, 30, '#ff5d5d', 'left', 700);
+    const inc = P(s.i), out = P(s.o), y = y0 + 68 + i * 40;
+    tx(ctx, `\u25b2 ${inc.name || 'Player'} #${inc.n ?? ''}`, 175, y, 30, '#3ddc84', 'left', 700);
+    tx(ctx, `\u25bc ${out.name || 'Player'} #${out.n ?? ''}`, 560, y, 30, '#ff5d5d', 'left', 700);
   });
 }
-
 function subFx(ctx, D, v, t, edit, sel) {
   // Half-time substitutions:
   // They are stored in `htSubs` on the second-half kickoff keyframe.
@@ -660,6 +676,7 @@ function subFx(ctx, D, v, t, edit, sel) {
 
   subCard(ctx, D, k.subs);
 }
+
 export function draw(ctx, D, t, edit, sel, se) {
   const cur = D.kfs[sel];
   const s0 = edit ? cur : stAt(D, t);
@@ -673,7 +690,7 @@ export function draw(ctx, D, t, edit, sel, se) {
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(0, 650, W, H - 650);
+  ctx.rect(SIDE, v.top, W - 2 * SIDE, v.bot - v.top);
   ctx.clip();
 
   if (prev && cur.isolation !== 'substitution') {
@@ -763,7 +780,7 @@ export function draw(ctx, D, t, edit, sel, se) {
     tx(
       ctx,
       `KEYFRAME ${sel + 1} \u00b7 ${cur.t}s \u00b7 ${field.toUpperCase()} FIELD${cur.hold ? ' \u00b7 ball with ' + cur.hold : ''}`,
-      W - 30, 658, 30, '#00e5ff', 'right', 700
+      W - SIDE, FIELD_TOP + 16, 26, '#00e5ff', 'right', 700
     );
   }
 
@@ -778,7 +795,7 @@ export function draw(ctx, D, t, edit, sel, se) {
       ) {
         ctx.globalAlpha = .9 * (1 - (t - k.t) / .25);
         ctx.fillStyle = '#0c1115';
-        ctx.fillRect(0, 650, W, H - 650);
+        ctx.fillRect(0, v.top, W, v.bot - v.top);
         ctx.globalAlpha = 1;
       }
     }
