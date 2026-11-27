@@ -24,11 +24,14 @@ Your work is saved automatically in the browser (localStorage). Recording gives 
 - Deselect: right-click the board or press Esc.
 - Faces: click a player row in the Players tab, then Upload photo. Size, Zoom and Move sliders adjust it.
 
-## Real match import (API-Football, free plan)
-1. Create a free account at https://www.api-football.com and copy your API key from the dashboard (the free plan gives 100 requests a day; one match uses about 3).
-2. In the project folder copy `.env.example` to a new file named `.env` and paste your key after `API_FOOTBALL_KEY=`.
-3. Stop and restart `npm run dev` (the key is only read when the dev server starts). The key stays on your computer: the dev server adds it to the requests, the browser never sees it.
-4. Open the **Import** tab, pick a date, press **Find finished matches**, click a match (or type a fixture ID). The app builds a draft: both lineups at their formation positions, substitutions, goals, cards and a half-time and full-time keyframe.
+
+## Real match import (PitchAPI, free)
+1. Get a free key at https://pitchapi.dev/get-api-key (no card, no request limit).
+2. Copy `.env.example` to `.env` and paste your key after `PITCHAPI_KEY=`.
+3. Restart `npm run dev` (the key is only read at start). The dev server adds it to the requests; the browser never sees it.
+4. Open the Import tab, pick a date, press Find finished matches, click a match (or type a match ID like m_B8x2K9).
 5. Use **Copy AI prompt** to send the draft plus your own description of the match to Claude, paste the JSON back, then edit the movements by hand.
 
 Notes: lineups, subs, goals, cards and the full-time stats are real. In-play stats are estimates (the API has no per-minute stats), and the third row shows Corners. Not every competition has lineups; the Import tab tells you when one is missing. Check API-Football's terms before using the data in a monetized channel.
+
+Generated replays are kept to 60 seconds or less. Manual edits and event switches can exceed that limit; the Timeline flags overlong projects and **Fit to 60 s** rescales keyframe times while preserving their order and half-time markers.

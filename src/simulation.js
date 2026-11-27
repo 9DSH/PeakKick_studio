@@ -9,6 +9,55 @@ export const FORMATIONS = {
   '5-3-2': [[34,8],[8,24],[21,20],[34,18],[47,20],[60,24],[24,42],[34,44],[44,42],[24,68],[44,68]]
 };
 
+const validRole = (role) => ['GK', 'DEF', 'MID', 'FWD'].includes(String(role || '').toUpperCase());
+const positionRole = (player) => {
+  const position = String(player.position || player.role || player.name || '').toLowerCase();
+  if (/goal.?keeper|keeper|^gk$/.test(position)) return 'GK';
+  if (/defen|back|^cb$|^fb$/.test(position)) return 'DEF';
+  if (/forward|strik|wing|attack/.test(position)) return 'FWD';
+  if (/mid/.test(position)) return 'MID';
+  return null;
+};
+const formationRole = (index, formation) => {
+  if (index === 0) return 'GK';
+  const rows = String(formation || '').split('-').map(Number).filter(Boolean);
+  if (!rows.length) return null;
+  if (index <= rows[0]) return 'DEF';
+  if (index <= rows[0] + (rows[1] || 0)) return rows.length === 2 ? 'FWD' : 'MID';
+  return 'FWD';
+};
+
+function inferredRole(D, team, index, player) {
+  const named = positionRole(player);
+  if (named) return named;
+  if (player.bench || player.join === 'never') return 'MID';
+  const fromFormation = formationRole(index, D.teams[team].formation);
+  if (fromFormation) return fromFormation;
+
+  const active = D.teams[team].players.map((p, i) => ({ p, i, q: D.kfs?.[0]?.[team]?.[i] }))
+    .filter(({ p, q }) => q && p.join !== 'never' && !p.bench && q[1] >= 0 && q[1] <= 105);
+  if (active.length >= 10 && index === 0) return 'GK';
+  const frame = D.kfs?.[0];
+  if (!frame || !frame[team]?.[index]) return 'MID';
+  const swapped = !!frame.sw;
+  const depth = (q) => team === 'A' !== swapped ? q[1] : 105 - q[1];
+  const sorted = active.filter(({ i }) => i !== 0 || active.length < 10)
+    .sort((a, b) => depth(a.q) - depth(b.q));
+  const rank = sorted.findIndex(({ i }) => i === index);
+  const ratio = sorted.length ? rank / sorted.length : 0.5;
+  return ratio < 0.4 ? 'DEF' : ratio > 0.7 ? 'FWD' : 'MID';
+}
+
+export function ensureRoles(D) {
+  ['A', 'B'].forEach((team) => {
+    (D.teams?.[team]?.players || []).forEach((player, index) => {
+      if (!validRole(player.role)) player.role = inferredRole(D, team, index, player);
+      else player.role = String(player.role).toUpperCase();
+    });
+  });
+  return D;
+}
+
 export const clampPitch = ([x,y]) => [Math.max(3,Math.min(65,x)),Math.max(3,Math.min(102,y))];
 export const RIGHT_BENCH_POINT = Object.freeze([60.5,52.5]);
 export const benchPoint = () => [...RIGHT_BENCH_POINT];
@@ -27,6 +76,13 @@ export function setTeamFormation(D, teamKey, half, formationName, mirror = false
   const players = D.teams[teamKey].players;
   const isSecond = half === 'second';
   const attackingUp = teamKey === 'A' ? !isSecond : isSecond;
+  players.forEach((p, i) => {
+    const counts = formationName.split('-').map(Number);
+    const role = i > counts.reduce((sum, value) => sum + value, 0)
+      ? 'MID'
+      : formationRole(i, formationName);
+    if (role) p.role = role;
+  });
   players.forEach((p, i) => {
     if (i >= pattern.length) return;
     let q = [...pattern[i]];
@@ -89,4 +145,27 @@ export function ensureMovementMeta(kf, prev, D) {
 export function eventStats(D) {
   const events=D.events||[];
   return ['sub','card','goal'].map(kind=>({kind,count:events.filter(e=>e.kind===kind).length||D.kfs.filter(k=>kind==='goal'?k.comment?.type==='goal':k.ev===kind).length}));
+}
+
+// Repairs substitution keyframes saved by the old importer: ON = bench -> spot, OFF = spot -> bench, camera on the substituting team's half.
+export function repairSubs(D) {
+  ensureRoles(D);
+  if (D.subFix === 2) return D;
+  D.kfs.forEach((kf, i) => {
+    if (!kf.subs?.length || kf.htSubs) return;
+    const prv = D.kfs[i - 1], nxt = D.kfs[i + 1];
+    kf.movements = kf.movements || {};
+    kf.subs.forEach((s, n) => {
+      const T = s.o[0], oi = +s.o.slice(1), ni = +s.i.slice(1);
+      const bench = benchFor(T, kf.sw, kf.subs.slice(0, n).filter((x) => x.o[0] === T).length);
+      const spot = [...(prv?.[T]?.[oi] || nxt?.[T]?.[ni] || [34, 52.5])]; // where the player going off really stood
+      kf[T][oi] = [...bench]; kf[T][ni] = [...spot];
+      const d = +(kf.subDuration || 1.8);
+      kf.movements[s.o] = { start: [...spot], end: [...bench], duration: d, type: 'benchExit', benchPoint: [...bench] };
+      kf.movements[s.i] = { start: [...bench], end: [...spot], duration: d, type: 'benchEntry', benchPoint: [...bench] };
+    });
+    kf.field = new Set(kf.subs.map((s) => s.o[0])).size > 1 ? 'full' : subField(kf.subs[0].o[0]);
+  });
+  D.subFix = 2;
+  return D;
 }

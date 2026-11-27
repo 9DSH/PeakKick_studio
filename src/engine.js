@@ -4,7 +4,7 @@
 export const W = 1080, H = 1920, HOLD_ANGLE = 45, HOLD_GAP = 3;
 export const SIDE = 50;            // gap left and right of the field (px)
 export const BOTTOM_GAP = 50;      // gap under the field (px). Raise it to keep the field clear of the YouTube Shorts UI
-export const FIELD_TOP = 510;      // where the field starts (just under the commentator box)
+export const FIELD_TOP = 530;      // where the field starts (just under the expanded commentator box)
 export const FIELD_BOTTOM = H - BOTTOM_GAP;
 export const HALF_STRETCH = 1;  // half view: 1 = half field fills the whole area (width fits, nothing cropped); 0 = no stretching, but a gap is left at the bottom
 export const RIGHT_BENCH_POINT = [60.5, 52.5];
@@ -15,6 +15,7 @@ export const PITCH_STYLE = {
 };
 export const cl = (v, a, b) => Math.max(a, Math.min(b, v));
 const FONT = "'Segoe UI','Helvetica Neue',Arial,sans-serif", S0 = (W - 2 * SIDE) / 68;
+const teamLineCache = new Map();
 
 // ---------- camera: which field is on screen (goal always at the top) ----------
 export const view = (field, fit = 'stretch', sw = false) => {
@@ -73,8 +74,8 @@ const MOM = [
 export const demo = () => ({
   meta: { showNames: true },
   teams: {
-    A: { name: 'HOME', color: '#00e5ff', players: [8, 10, 7, 9, 11].map((n, i) => ({ n, name: ['Midfielder', 'Playmaker', 'Winger', 'Striker', ''][i] })) },
-    B: { name: 'AWAY', color: '#f5c542', players: [4, 5, 3, 2, 1].map((n) => ({ n, name: n === 1 ? 'Keeper' : '' })) }
+    A: { name: 'HOME', color: '#00e5ff', players: [8, 10, 7, 9, 11].map((n, i) => ({ n, name: ['Midfielder', 'Playmaker', 'Winger', 'Striker', ''][i], role: ['MID', 'MID', 'FWD', 'FWD', 'MID'][i] })) },
+    B: { name: 'AWAY', color: '#f5c542', players: [4, 5, 3, 2, 1].map((n) => ({ n, name: n === 1 ? 'Keeper' : '', role: n === 1 ? 'GK' : 'DEF' })) }
   },
   kfs: RAW.map((r, i) => {
     const m = MOM[i];
@@ -134,7 +135,7 @@ export function normalize(n) {
     delete g.mv;
 
     // Do not carry event-specific data into later keyframes.
-    ['subs', 'ev', 'evId', 'goalFor', 'og', 'ph', 'htSubs', 'instant'].forEach((x) => {
+    ['subs', 'ev', 'evId', 'goalFor', 'og', 'pen', 'ph', 'htSubs', 'instant'].forEach((x) => {
       if (f[x] === undefined) delete g[x];
     });
 
@@ -335,12 +336,12 @@ function face(ctx, im, x, y, r, zoom, xo, yo) {
   ctx.restore();
 }
 
-function tx(ctx, s, x, y, size, col, al = 'center', w = 800) {
+function tx(ctx, s, x, y, size, col, al = 'center', w = 800, maxWidth) {
   ctx.font = `${w} ${size}px ${FONT}`;
   ctx.fillStyle = col;
   ctx.textAlign = al;
   ctx.textBaseline = 'middle';
-  ctx.fillText(s, x, y);
+  maxWidth ? ctx.fillText(s, x, y, maxWidth) : ctx.fillText(s, x, y);
 }
 
 function panel(ctx, x, y, w, h, accent = '#22d3ee') {
@@ -352,40 +353,71 @@ function panel(ctx, x, y, w, h, accent = '#22d3ee') {
 
 function ui(ctx, D, t) {
   const st = stAt(D, t), TA = D.teams.A, TB = D.teams.B, sc = st.score, s = st.stats, tot = D.kfs.at(-1).t + 1.2;
-  // ---- scoreboard (compact, y 20 -> 356) ----
-  panel(ctx, 40, 20, 1000, 336);
-  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(480, 32, 120, 34, 17); ctx.fill(); ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 2; ctx.stroke();
-  tx(ctx, `${Math.floor(minuteAt(D, t))}'`, 540, 50, 24, '#00e5ff', 'center', 800);
-  [[TA, 150], [TB, 930]].forEach(([T, bx]) => { badge(ctx, T, bx, 114); const z = fit(ctx, T.name, 230, 26, 700); tx(ctx, T.name, bx, 180, z, '#fff', 'center', 700); });
-  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(350, 74, 380, 88, 24); ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.lineWidth = 2; ctx.stroke();
-  tx(ctx, String(sc[0]), 445, 120, 76, '#fff', 'center', 800); tx(ctx, ':', 540, 115, 56, '#6f8794', 'center', 700); tx(ctx, String(sc[1]), 635, 120, 76, '#fff', 'center', 800);
+  panel(ctx, 40, 20, 1000, 380);
+
+  const minute = `${Math.floor(minuteAt(D, t))}'`;
+  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(494, 108, 92, 36, 18); ctx.fill();
+  ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 2; ctx.stroke();
+  tx(ctx, minute, 540, 126, 23, '#00e5ff', 'center', 800);
+  ctx.fillStyle = '#0a1115'; ctx.beginPath(); ctx.roundRect(450, 151, 180, 59, 18); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.lineWidth = 2; ctx.stroke();
+  tx(ctx, `${sc[0]} : ${sc[1]}`, 540, 180, fit(ctx, `${sc[0]} : ${sc[1]}`, 165, 46, 800), '#fff', 'center', 800);
+
+  badge(ctx, TA, 110, 153, 82);
+  badge(ctx, TB, 970, 153, 82);
+  const homeLines = teamLines(ctx, TA.name || 'HOME'), awayLines = teamLines(ctx, TB.name || 'AWAY');
+  [[homeLines, 48, 110, TA.color], [awayLines, 908, 970, TB.color]].forEach(([lines, x, cx, color]) => {
+    const height = lines.length > 1 ? 13 * lines.length + 5 : 29, top = 197;
+    ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect(x, top, 124, height, 8); ctx.fill();
+    const size = fit(ctx, lines.length > 1 ? 'International' : lines[0], 118, lines.length > 1 ? 15 : 21, 700, 11);
+    lines.forEach((line, i) => tx(ctx, line, cx, lines.length > 1 ? top + 8 + i * 13 : top + 15, fit(ctx, line, 118, size, 700, 11), ink(color), 'center', 700, 118));
+  });
+
   const goals = D.kfs.filter((k) => k.comment?.type === 'goal' && k.t <= t + 1e-6 && k.actor);
-  [['A', 150], ['B', 930]].forEach(([k, cx]) => {
-    const g = goals.filter((x) => (x.goalFor || x.actor[0]) === k).at(-1); if (!g) return;
-    const p = D.teams[g.actor[0]]?.players[+g.actor.slice(1)] || {}, label = `\u26bd ${p.name || '#' + p.n}${g.og ? ' (OG)' : ''} ${Math.floor(g.minute)}'`;
-    tx(ctx, label, cx, 206, fit(ctx, label, 270, 20, 700), '#cfe9f0', 'center', 700);
+  const goalRows = (team) => goals.filter((g) => (g.goalFor || g.actor[0]) === team).map((g) => {
+    const p = D.teams[g.actor[0]]?.players[+g.actor.slice(1)] || {};
+    const name = p.name?.trim().split(/\s+/).filter(Boolean).at(-1) || '#' + p.n;
+    return `\u26bd ${name} ${Math.floor(g.minute)}'${g.og ? ' (OG)' : g.pen ? ' (P)' : ''}`;
   });
-  tx(ctx, 'Ball possession' + ({ '1H': ' · 1st half', '2H': ' · 2nd half', FT: ' · Full time' }[st.sl] || ''), 540, 204, 20, '#c3cfd5', 'center', 700);
-  const bx0 = 75, bw = 930, hp = cl(s.poss[0] / Math.max(1, s.poss[0] + s.poss[1]), .05, .95);
-  ctx.fillStyle = TA.color; ctx.beginPath(); ctx.roundRect(bx0, 222, bw * hp - 2, 28, 14); ctx.fill();
-  ctx.fillStyle = TB.color; ctx.beginPath(); ctx.roundRect(bx0 + bw * hp + 2, 222, bw * (1 - hp) - 2, 28, 14); ctx.fill();
-  tx(ctx, s.poss[0] + '%', bx0 + 20, 237, 22, ink(TA.color), 'left', 800); tx(ctx, s.poss[1] + '%', bx0 + bw - 20, 237, 22, ink(TB.color), 'right', 800);
-  [['Total shots', 'shots'], ['Shots on target', 'sot'], [D.meta.bigLabel || 'Big chances', 'big']].forEach(([lab, key], i) => {
-    const y = 276 + i * 28, a = s[key][0], b = s[key][1], tt = a + b, wa = tt ? 420 * a / tt : 210;
-    ctx.fillStyle = '#16222a'; ctx.beginPath(); ctx.roundRect(75, y - 13, 930, 26, 13); ctx.fill();
-    tx(ctx, lab, 540, y - 4, 19, '#c3cfd5', 'center', 700); tx(ctx, String(a), 105, y - 1, 22, '#fff', 'left', 800); tx(ctx, String(b), 975, y - 1, 22, '#fff', 'right', 800);
-    ctx.fillStyle = tt ? TA.color : '#34424a'; ctx.fillRect(330, y + 7, wa, 3); ctx.fillStyle = tt ? TB.color : '#34424a'; ctx.fillRect(330 + wa, y + 7, 420 - wa, 3);
+  [['A', 448, 'right'], ['B', 632, 'left']].forEach(([team, x, align]) => {
+    const list = goalRows(team), maxLines = 5, crowded = list.length > maxLines;
+    const rows = crowded ? [...list.slice(0, maxLines - 1), `+${list.length - maxLines + 1} more`] : list;
+    const baseSize = list.length > 4 ? 17 : list.length > 2 ? 19 : 21;
+    rows.forEach((text, i) => tx(ctx, text, x, 120 + i * 18, fit(ctx, text, 260, baseSize, 700, 13), '#e7f0f3', align, 700, 260));
   });
-  // ---- commentator box (compact, y 368 -> 492): title and text centred ----
+
+  const period = { '1H': '1st half', '2H': '2nd half', FT: 'Full time' }[st.sl] || '';
+  const stats = [
+    { key: 'poss', label: `Ball possession${period ? ` · ${period}` : ''}`, suffix: '%' },
+    { key: 'shots', label: 'Total shots', suffix: '' },
+    { key: 'sot', label: 'Shots on target', suffix: '' },
+    { key: 'big', label: D.meta?.bigLabel || 'Corners', suffix: '' }
+  ];
+  stats.forEach(({ key, label, suffix }, i) => {
+    const y = 242 + i * 30, a = +s[key][0] || 0, b = +s[key][1] || 0, sum = a + b;
+    const ratio = sum ? cl(a / sum, 0, 1) : 0.5, barX = 196, barW = 688;
+    ctx.fillStyle = '#0b1318'; ctx.beginPath(); ctx.roundRect(barX, y + 20, barW, 8, 4); ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.roundRect(barX, y + 20, barW, 8, 4); ctx.clip();
+    ctx.fillStyle = TA.color; ctx.fillRect(barX, y + 20, barW * ratio, 8);
+    ctx.fillStyle = TB.color; ctx.fillRect(barX + barW * ratio, y + 20, barW * (1 - ratio), 8);
+    ctx.restore();
+    ctx.fillStyle = TA.color; ctx.beginPath(); ctx.roundRect(78, y, 80, 27, 10); ctx.fill();
+    ctx.fillStyle = TB.color; ctx.beginPath(); ctx.roundRect(922, y, 80, 27, 10); ctx.fill();
+    tx(ctx, `${a}${suffix}`, 118, y + 13, 17, ink(TA.color), 'center', 800);
+    tx(ctx, `${b}${suffix}`, 962, y + 13, 17, ink(TB.color), 'center', 800);
+    tx(ctx, label, 540, y + 9, fit(ctx, label, 430, 19, 700, 13), '#e1eaee', 'center', 700);
+  });
+
+  // ---- commentator box: title and text centred ----
   const cm = st.comment || { type: 'info', text: '' }, ev = EV[cm.type] || EV.info, goal = cm.type === 'goal', ac = goal ? '#f5c542' : '#22d3ee';
-  panel(ctx, 40, 368, 1000, 124, ac);
+  panel(ctx, 40, 414, 1000, 104, ac);
   const head = `${ev[0]}  ${ev[1]}`; ctx.font = `800 22px ${FONT}`; const hw = ctx.measureText(head).width + 48;
-  ctx.fillStyle = ac + '22'; ctx.beginPath(); ctx.roundRect(540 - hw / 2, 380, hw, 30, 15); ctx.fill(); ctx.strokeStyle = ac + '88'; ctx.lineWidth = 2; ctx.stroke();
-  tx(ctx, head, 540, 395, 22, goal ? '#f5c542' : '#00e5ff', 'center', 800);
-  ctx.font = `600 26px ${FONT}`; const lines = wrap(ctx, cm.text, 880);
-  lines.forEach((l, i) => tx(ctx, l, 540, (lines.length > 1 ? 436 : 450) + i * 28, 26, '#fff', 'center', 600));
-  ctx.fillStyle = '#ffffff22'; ctx.fillRect(95, 482, 890, 5); ctx.fillStyle = ac; ctx.fillRect(95, 482, 890 * cl(t / tot, 0, 1), 5);
-  D.kfs.forEach((k) => { ctx.fillStyle = k.comment?.type === 'goal' ? '#f5c542' : '#ffffffaa'; ctx.beginPath(); ctx.arc(95 + 890 * (k.t / tot), 484.5, k.comment?.type === 'goal' ? 6 : 3.5, 0, 7); ctx.fill(); });
+  ctx.fillStyle = ac + '22'; ctx.beginPath(); ctx.roundRect(540 - hw / 2, 422, hw, 28, 14); ctx.fill(); ctx.strokeStyle = ac + '88'; ctx.lineWidth = 2; ctx.stroke();
+  tx(ctx, head, 540, 436, 22, goal ? '#f5c542' : '#00e5ff', 'center', 800);
+  ctx.font = `600 23px ${FONT}`; const lines = wrap(ctx, cm.text, 900);
+  lines.forEach((l, i) => tx(ctx, l, 540, (lines.length > 1 ? 466 : 479) + i * 25, 23, '#fff', 'center', 600));
+  ctx.fillStyle = '#ffffff22'; ctx.fillRect(95, 504, 890, 4); ctx.fillStyle = ac; ctx.fillRect(95, 504, 890 * cl(t / tot, 0, 1), 4);
+  D.kfs.forEach((k) => { ctx.fillStyle = k.comment?.type === 'goal' ? '#f5c542' : '#ffffffaa'; ctx.beginPath(); ctx.arc(95 + 890 * (k.t / tot), 506, k.comment?.type === 'goal' ? 5 : 3, 0, 7); ctx.fill(); });
 }
 
 function wrap(ctx, text, maxW) {
@@ -422,29 +454,55 @@ const EV = {
 
 export const EVENT_TYPES = Object.keys(EV);
 
-const fit = (ctx, str, max, size, w = 700) => {
+const fit = (ctx, str, max, size, w = 700, min = 12) => {
   let z = size;
   ctx.font = `${w} ${z}px ${FONT}`;
-  while (z > 22 && ctx.measureText(str).width > max) {
+  while (z > min && ctx.measureText(str).width > max) {
     z -= 2;
     ctx.font = `${w} ${z}px ${FONT}`;
   }
   return z;
 };
 
-function badge(ctx, T, cx, cy) {
+function teamLines(ctx, value) {
+  const text = String(value).trim();
+  if (teamLineCache.has(text)) return teamLineCache.get(text);
+  ctx.font = `600 16px ${FONT}`;
+  const lines = [''];
+  let truncated = false;
+  for (const word of text.split(/\s+/)) {
+    const i = lines.length - 1, candidate = lines[i] ? `${lines[i]} ${word}` : word;
+    if (ctx.measureText(candidate).width <= 118 || !lines[i]) {
+      lines[i] = candidate;
+    } else if (lines.length < 3) {
+      lines.push(word);
+    } else {
+      truncated = true;
+      break;
+    }
+  }
+  if (truncated) {
+    let tail = lines[2];
+    while (tail && ctx.measureText(`${tail}…`).width > 118) tail = tail.slice(0, -1);
+    lines[2] = `${tail.trimEnd()}…`;
+  }
+  teamLineCache.set(text, lines);
+  return lines;
+}
+
+function badge(ctx, T, cx, cy, size = 100) {
   const im = img(T.badge);
 
   if (im) {
-    const k = Math.min(100 / im.naturalWidth, 100 / im.naturalHeight);
+    const k = Math.min(size / im.naturalWidth, size / im.naturalHeight);
     const w = im.naturalWidth * k, h = im.naturalHeight * k;
     ctx.drawImage(im, cx - w / 2, cy - h / 2, w, h);
   } else {
     ctx.fillStyle = T.color;
     ctx.beginPath();
-    ctx.arc(cx, cy, 46, 0, 7);
+    ctx.arc(cx, cy, size * 0.44, 0, 7);
     ctx.fill();
-    tx(ctx, (T.name || '').slice(0, 3).toUpperCase(), cx, cy + 2, 34, ink(T.color), 'center', 800);
+    tx(ctx, (T.name || '').slice(0, 3).toUpperCase(), cx, cy + 2, Math.max(14, size * 0.34), ink(T.color), 'center', 800);
   }
 }
 
@@ -619,9 +677,7 @@ function subFx(ctx, D, v, t, edit, sel) {
     });
   });
 
-  // keep the card away from the bench: if the halfway line is at the top of a half view, put the card lower
-  const fld = (edit ? D.kfs[sel] : stAt(D, t)).field;
-  subCard(ctx, D, k.subs, fld !== 'full' && !v.up ? FIELD_TOP + 330 : FIELD_TOP + 60);
+  subCard(ctx, D, k.subs, FIELD_TOP + 60);
 }
 
 export function draw(ctx, D, t, edit, sel, se) {
@@ -631,6 +687,31 @@ export function draw(ctx, D, t, edit, sel, se) {
   const v = view(field, D.meta.fit, s0.sw);
   const m = D.meta, TA = D.teams.A, TB = D.teams.B;
   const prev = edit && sel > 0 ? D.kfs[sel - 1] : null;
+  const celebration = edit ? null : [...D.kfs].reverse().find((k) =>
+    k.comment?.type === 'goal' && t >= k.t && t < k.t + 2.4
+  );
+  const scoringTeam = celebration && (celebration.goalFor || celebration.actor?.[0]);
+  const attacksUp = !!scoringTeam && ((scoringTeam === 'A') !== !!celebration.sw);
+  const celebrationPosition = (id) => {
+    const player = D.teams[id[0]]?.players[+id.slice(1)];
+    if (!celebration || !player || presence(D, player, celebration.t, false) <= 0) return pos(D, id, t);
+    const start = pos(D, id, celebration.t);
+    const inDefendingHalf = attacksUp ? start[1] > 52.5 : start[1] < 52.5;
+    if (id[0] !== scoringTeam || !inDefendingHalf) return start;
+
+    const cornerX = rnd((celebration.id || 1) * 31) < 0.5 ? 3 : 65;
+    const goalY = attacksUp ? 103 : 2;
+    const seed = (celebration.id || 1) * 101 + (id[0] === 'A' ? 37 : 73) + (+id.slice(1) * 17);
+    const inward = Math.atan2(goalY > 52 ? -1 : 1, cornerX < 34 ? 1 : -1);
+    const angle = inward + (rnd(seed) - 0.5) * Math.PI / 2, radius = 5 + rnd(seed + 11) * 7;
+    const target = [
+      cl(cornerX + Math.cos(angle) * radius, 2, 66),
+      cl(goalY + Math.sin(angle) * radius, 1, 104)
+    ];
+    const u = cl((t - celebration.t) / 0.7, 0, 1);
+    const eased = u * u * (3 - 2 * u);
+    return [start[0] + (target[0] - start[0]) * eased, start[1] + (target[1] - start[1]) * eased];
+  };
 
   pitch(ctx, v, field);
   ui(ctx, D, t);
@@ -700,7 +781,7 @@ export function draw(ctx, D, t, edit, sel, se) {
     if (activeSub?.subs?.some((s) => s.i === id || s.o === id)) al = 1;   // both walk at full opacity (the outgoing no longer fades before he reaches the bench)
 
     if (al > 0) {
-      dot(ctx, v, pos(D, id, t), p, T.color, edit && se === id, m.showNames, al);
+      dot(ctx, v, celebrationPosition(id), p, T.color, edit && se === id, m.showNames, al);
     }
   });
 
@@ -745,15 +826,11 @@ export function draw(ctx, D, t, edit, sel, se) {
       }
     }
 
-    const g = [...D.kfs].reverse().find((k) =>
-      k.comment?.type === 'goal' &&
-      t >= k.t &&
-      t < k.t + 2.4
-    );
+    const g = celebration;
 
     if (g) {
       const k = t - g.t;
-      const sp = proj(v, g.actor ? pos(D, g.actor, t) : [34, 90]);
+      const sp = proj(v, g.actor ? celebrationPosition(g.actor) : [34, 90]);
 
       ctx.strokeStyle = `rgba(255,255,255,${.5 + .4 * Math.sin(t * 8)})`;
       ctx.lineWidth = 6;

@@ -1,8 +1,15 @@
 // Switch substitutions / cards on or off: removes or re-inserts their keyframes and fixes the players and times around them.
 import { benchFor } from './simulation.js';
+import { MAX_SECONDS } from './importer.js';
 
 const newId = (D) => Math.max(0, ...D.kfs.map((k) => k.id ?? 0)) + 1;
 const num = (id) => +id.slice(1);
+const lengthWarning = (D) => {
+  const length = (D.kfs.at(-1)?.t || 0) + 1.2;
+  return length > MAX_SECONDS
+    ? ` Warning: replay length is ${length.toFixed(1)} s, above ${MAX_SECONDS} s. Use “Fit to ${MAX_SECONDS} s”.`
+    : '';
+};
 
 export function setEvents(D, kind, on) {
   if (!D.events) return 'This project has no event list. Import the match again to use these switches.';
@@ -18,7 +25,7 @@ export function setEvents(D, kind, on) {
       });
       D.kfs.splice(i, 1); for (let j = i; j < D.kfs.length; j++) D.kfs[j].t = +(D.kfs[j].t - dur).toFixed(1);
     }
-    D.evOn[kind] = false; return `${label} are off: their keyframes were removed.`;
+    D.evOn[kind] = false; return `${label} are off: their keyframes were removed.${lengthWarning(D)}`;
   }
   let added = 0;
   for (const e of D.events.filter((x) => x.kind === kind).sort((a, b) => a.m - b.m)) {
@@ -45,5 +52,5 @@ export function setEvents(D, kind, on) {
     }
     k.splice(at, 0, kf); for (let j = at + 1; j < k.length; j++) k[j].t = +(k[j].t + dur).toFixed(1); added++;
   }
-  D.evOn[kind] = true; return `${label} are on: ${added} keyframe${added === 1 ? '' : 's'} added.`;
+  D.evOn[kind] = true; return `${label} are on: ${added} keyframe${added === 1 ? '' : 's'} added.${lengthWarning(D)}`;
 }

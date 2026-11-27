@@ -8,12 +8,15 @@ export default function Timeline({
   sel,
   mode,
   tot,
+  maxSeconds,
   phRef,
   onSel,
   onTime,
   onScrub,
   onAdd,
+  onFit,
   onDel,
+  onLeave,
   onAttach,
   onJoin,
   onField
@@ -38,29 +41,20 @@ export default function Timeline({
   const cur = k[sel];
   const snap = (v) => Math.round(v * 10) / 10;
 
-  // Half-time boundary:
-  // Prefer the keyframe flagged H2, then HT, then the first keyframe at/after 45.
-  const h2 = k.findIndex((f) => f.ph === 'H2');
-
-  const ht = (() => {
-    if (h2 > 0) return h2;
-
-    const i = k.findIndex((f) => f.ph === 'HT');
-    if (i > 0) return i;
-
-    const j = k.findIndex((f) => f.minute >= 45);
-    return j > 0 ? j : -1;
-  })();
-
-  // Draw the HT marker at the actual HT keyframe, not the H2 keyframe.
-  const iHT = k.findIndex((f) => f.ph === 'HT');
-  const htl = iHT > 0 ? iHT : ht;
-
+  const htIndex = k.findIndex((f) => f.ph === 'HT');
+  const h2Index = k.findIndex((f) => f.ph === 'H2');
+  const fallbackH2 = k.findIndex((f) => f.sl === '2H');
+  const minuteBoundary = k.findIndex((f) => f.minute >= 45);
+  const secondStart = h2Index > 0 ? h2Index : fallbackH2 > 0 ? fallbackH2 : minuteBoundary;
+  const firstEnd = htIndex > 0 ? htIndex : secondStart > 0 ? secondStart - 1 : -1;
+  const hasHalves = firstEnd > 0 && secondStart > firstEnd;
+  const splitGap = hasHalves ? k[secondStart].t - k[firstEnd].t : 0;
+  const halfPadding = Math.min(0.35, Math.max(0, splitGap / 2));
   const range = () => (
-    half === '1' && ht > 0
-      ? [0, k[h2 > 0 ? ht - 1 : ht].t + 0.5]
-      : half === '2' && ht > 0
-        ? [Math.max(0, k[ht].t - 0.5), tot]
+    half === '1' && hasHalves
+      ? [0, Math.min(tot, k[firstEnd].t + halfPadding)]
+      : half === '2' && hasHalves
+        ? [Math.max(0, k[secondStart].t - halfPadding), tot]
         : [0, tot]
   );
 
@@ -223,6 +217,13 @@ export default function Timeline({
   });
 
   const inRange = (f) => f.t >= a - 0.01 && f.t <= b + 0.01;
+  const selectHalf = (next) => {
+    setFz(null);
+    setZ(1);
+    setHalf(next);
+    if (next === '1' && hasHalves && sel > firstEnd) onSel(firstEnd);
+    if (next === '2' && hasHalves && sel < secondStart) onSel(secondStart);
+  };
 
   return (
     <div className="tlw">
@@ -274,6 +275,7 @@ export default function Timeline({
           <button className="pri" onClick={() => onJoin(joinTeam, joinPlayer)}>
             + Add to keyframe
           </button>
+           <button className="dng" onClick={() => onLeave(joinTeam + joinPlayer)}>− Remove</button>
         </span>
 
         <label className="hint">
@@ -324,8 +326,8 @@ export default function Timeline({
             <button
               key={h}
               className={half === h ? 'pri' : ''}
-              disabled={h !== 'all' && ht < 1}
-              onClick={() => setHalf(h)}
+              disabled={h !== 'all' && !hasHalves}
+              onClick={() => selectHalf(h)}
             >
               {l}
             </button>
@@ -341,7 +343,10 @@ export default function Timeline({
         <span className="hint">{Math.round(z * 100)}%</span>
 
         <span className="hint">
-          Length {tot.toFixed(1)} s · {k.length} keyframes
+          <span className={tot > maxSeconds ? 'length-over' : ''}>
+            Length {tot.toFixed(1)} s · {k.length} keyframes
+          </span>
+          <button className="fit-limit" onClick={onFit} disabled={tot <= maxSeconds}>Fit to {maxSeconds} s</button>
         </span>
       </div>
 
@@ -443,9 +448,9 @@ export default function Timeline({
               </div>
             ))}
 
-          {htl > 0 && inRange(k[htl]) && (
-            <div className="htl" style={{ left: X(k[htl].t) }}>
-              <span>HT</span>
+          {((half === '2' ? secondStart : firstEnd) > 0) && inRange(k[half === '2' ? secondStart : firstEnd]) && (
+            <div className="htl" style={{ left: X(k[half === '2' ? secondStart : firstEnd].t) }}>
+              <span>{half === '2' ? '2H' : 'HT'}</span>
             </div>
           )}
 

@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { cl, dflt, normalize, EVENT_TYPES } from './engine.js';
-import { listFixtures, loadMatch } from './importer.js';
+import { cl, dflt, normalize, EVENT_TYPES, presence } from './engine.js';
+import { listFixtures, listRecent, loadMatch } from './importer.js';
 import { setEvents } from './events.js';
 import { FORMATIONS, setTeamFormation, mirrorPitch, movementStats, ensureMovementMeta, benchFor, subField } from './simulation.js';
 // Resize an uploaded photo to max 256px and return a small data URL.
@@ -35,14 +35,33 @@ function SubTabs({ items, value, onChange }) {
   return <div className="subtabs">{items.map(([key,label]) => <button key={key} className={value===key?'on':''} onClick={()=>onChange(key)}>{label}</button>)}</div>;
 }
 
-export default function SidePanel({ D, upd, sel, se, setSe, setMsg, delPlayer, onField, onImport, onSelectKeyframe }) {
+export default function SidePanel({ D, upd, sel, se, setSe, setMsg, delPlayer, onField, onImport, onSelectKeyframe, onJoin, onLeave }) {
   const [tab, setTab] = useState('kf'), [json, setJson] = useState(null), [formationHalf, setFormationHalf] = useState('first'), [bulk, setBulk] = useState([]), [kfSub, setKfSub] = useState('moment'), [formationSub, setFormationSub] = useState('team'), [playerSub, setPlayerSub] = useState('active'), [eventSub, setEventSub] = useState('types'), [matchSub, setMatchSub] = useState('teams'), [subTeam, setSubTeam] = useState('A'), [subOut, setSubOut] = useState(0), [subIn, setSubIn] = useState(0), kf = D.kfs[sel];
-  const [date, setDate] = useState(() => new Date(Date.now() - 864e5).toISOString().slice(0, 10)), [q, setQ] = useState(''), [rows, setRows] = useState([]), [fid, setFid] = useState(''), [ist, setIst] = useState('');
-  const find = async () => { setIst('Searching…'); try { const r = await listFixtures(date); setRows(r.rows); setIst(`${r.rows.length} finished matches. Requests left today: ${r.left ?? '?'}`); } catch (e) { setIst(e.message); } };
-  const load = async (id) => { if (!id) return; setIst('Loading match…'); try { const r = await loadMatch(id); setIst(`Loaded. ${r.D.match.statsSrc === 'api' ? 'First-half and second-half stats came from the API.' : 'The API sent no half-by-half stats, so the halves are estimated from the full-match totals.'} Requests left today: ${r.left ?? '?'}`); onImport(r.D); } catch (e) { setIst(e.message); } };
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10)), [useDate, setUseDate] = useState(false), [days, setDays] = useState(30), [q, setQ] = useState(''), [rows, setRows] = useState([]), [fid, setFid] = useState(''), [ist, setIst] = useState('');
+  // A manual substitution must take one player currently on the pitch and
+  // one player currently off it. Resolve safe defaults if the selected team
+  // or keyframe changes while this panel is open.
+  const subRoster = D.teams[subTeam].players.map((p, i) => ({ p, i, id: subTeam + i }));
+  const subOutgoing = subRoster.filter(({ p, id }) =>
+    presence(D, p, kf.t, true) > 0 && !kf.hidden?.includes(id)
+  );
+  const subIncoming = subRoster.filter(({ p, id }) =>
+    !(presence(D, p, kf.t, true) > 0 && !kf.hidden?.includes(id))
+  );
+  const subOutIndex = subOutgoing.some(x => x.i === subOut) ? subOut : (subOutgoing[0]?.i ?? -1);
+  const subInIndex = subIncoming.some(x => x.i === subIn) ? subIn : (subIncoming[0]?.i ?? -1);
+
+  const find = async () => {
+    setIst('Searching…');
+    try {
+      if (useDate) { const r = await listFixtures(date); setRows(r.rows); setIst(`${r.rows.length} matches on ${date}. Type a team name in the filter to narrow them down.`); }
+      else { const r = await listRecent(days, (n, tot) => setIst(`Scanning… ${n}/${tot} days`)); setRows(r.rows); setIst(`${r.rows.length} matches in the last ${days} days${r.failed ? ` (${r.failed} days could not be loaded, press Find again)` : ''}. Type a team name in the filter to see only its matches.`); }
+    } catch (e) { setIst(e.message); }
+  };
+  const load = async (id) => { if (!id) return; setIst('Loading match…'); try { const r = await loadMatch(id); setIst(r.D.match.statsSrc === 'api' ? 'Loaded. First-half and second-half stats came from the API.' : 'Loaded. No half-by-half stats were found, so the halves are estimated from the full-match totals.'); onImport(r.D); } catch (e) { setIst(e.message); } };
   const setN = (k, n) => upd((d) => {
     const P = d.teams[k].players; n = cl(n, 1, 26);
-    while (P.length < n) { P.push({ n: Math.max(0, ...P.map((p) => +p.n || 0)) + 1, name: '' }); d.kfs.forEach((f) => f[k].push(dflt(k, P.length - 1))); }
+    while (P.length < n) { P.push({ n: Math.max(0, ...P.map((p) => +p.n || 0)) + 1, name: '', role: 'MID' }); d.kfs.forEach((f) => f[k].push(dflt(k, P.length - 1))); }
     while (P.length > n) { P.pop(); d.kfs.forEach((f) => { f[k].pop(); if (f.hold && f.hold[0] === k && +f.hold.slice(1) >= P.length) f.hold = null; if (f.actor && f.actor[0] === k && +f.actor.slice(1) >= P.length) f.actor = null; }); }
   });
   const player = (k, i, patch) => upd((d) => Object.assign(d.teams[k].players[i], patch));
@@ -61,7 +80,7 @@ PITCH: world coordinates in metres, x 0-68 (left to right), y 0-105. The HOME te
 FIELD: "field" is which half the camera shows: "away" = camera on the Away half, Away goal at the TOP (use while Home attack upward), "home" = camera on the Home half, Home goal at the BOTTOM (use while Away attack downward), "full" = whole pitch, use it ONLY at kick-off, half-time, the second-half restart, full time and substitutions. During play always use "away" or "home" (whichever half the ball is in) and switch when the ball crosses halfway, with a short keyframe showing the ball at the halfway line.
 
 FORMAT:
-{"teams":{"A":{"name":"","color":"#00e5ff","players":[{"n":9,"name":"Name"}]},"B":{"name":"","color":"#f5c542","players":[{"n":1,"name":"Name"}]}},
+{"teams":{"A":{"name":"","color":"#00e5ff","players":[{"n":9,"name":"Name","role":"FWD"}]},"B":{"name":"","color":"#f5c542","players":[{"n":1,"name":"Name","role":"GK"}]}},
 "kfs":[{"t":0,"minute":10,"score":[0,0],"field":"away","actor":"A3","hold":"A3","ball":[34,60],"mv":{"A3":[36,70],"B2":[30,80]},"stats":{"poss":[55,45],"shots":[3,1],"sot":[1,0],"big":[0,0]},"comment":{"type":"pass","text":"Short commentary line"}}]}
 
 RULES:
@@ -73,6 +92,11 @@ RULES:
 - "actor" = the player this moment is about. For a goal, actor MUST be the scorer: the scoreboard lists scorers and minutes from the goal keyframes.
 - "minute" = match minute at that moment. "score" = [home, away] so far. "stats" are totals so far, each [home, away]: poss = possession %, shots, sot = shots on target, big = big chances.
 - comment.type is one of: ${EVENT_TYPES.join(', ')}. For a goal, use type "goal", the new score, and put the ball about 1 m behind the goal line (y about 106 for Home goals, y about -1 for Away goals).
+- Every player has a "role": "GK", "DEF", "MID" or "FWD". Derive it from the formation row and keep it on the player object; use "MID" for a new manual player unless their position is known.
+- Keep realistic team shape around the ball. Lines move together; defending teams compact and shift toward the ball, while attacking teams stretch. In an attacking half view keep centre-backs around or behind halfway (at most one full-back joins); in a defended-half view keep the goalkeeper, defenders and deeper midfielders in that half, but keep forwards and the striker line at or beyond halfway.
+- Before every pass, move the nearest opposing player about 65% of the way toward the current carrier, send the second nearest to cover the receiver or passing lane, and compact the rest toward the ball side. Record these in "movements" with type "press" and "cover". Start the receiver's run one keyframe before the pass and send one or two teammates forward; start the scorer's run into the box early.
+- No player should travel faster than about 8 metres/second between keyframes (except a goalkeeper's dive, substitution path, half-time/restart instant, or manual edit). Passes take at least 0.6 seconds.
+- Keep the total replay length at 60 seconds or less (last keyframe t <= 58.8). A real goal must retain at least three completed passes, a shot and a goal keyframe; do not remove real goals, cards or substitutions to fit the limit.
 - Keep my player names and numbers unless I give new ones. If the JSON came from a real match import, KEEP every real fact (lineups, substitutions, goals, cards, minutes, score, stats) and keep each player's join, leave and bench fields, every keyframe id, and goalFor / og on goals. Only improve the movement: add extra keyframes between the real events for build-up play, passes (hold changes) and shots, following my description below.
 
 MY MATCH DESCRIPTION: [WRITE WHAT HAPPENED HERE: teams, lineups, then moment by moment with minutes]
@@ -84,11 +108,23 @@ ${noPhotos(D)}`;
     <aside className="side">
       <nav>{tabs.map(([k, l]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}</nav>
       {tab === 'im' && <>
-        <p className="hint">Needs a free API-Football key in the .env file (see README). One match costs about 3 of your 100 daily requests. Importing replaces the current project.</p>
-        <div className="f"><label>Match date<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label><label>Filter (team or league)<input value={q} onChange={(e) => setQ(e.target.value)} /></label></div>
-        <button className="pri" onClick={find}>Find finished matches</button>
-        <div className="mlist">{rows.filter((r) => (r.home + r.away + r.league).toLowerCase().includes(q.toLowerCase())).map((r) => <button key={r.id} className="mrow" onClick={() => load(r.id)}><small>{r.league}</small><br />{r.home} {r.gh}-{r.ga} {r.away}</button>)}</div>
-        <div className="r"><input placeholder="or fixture ID" value={fid} onChange={(e) => setFid(e.target.value)} style={{ width: 130 }} /><button onClick={() => load(fid)}>Load</button></div>
+        <p className="hint">Needs a free PitchAPI key in the .env file (see README). No request limit. Importing replaces the current project.</p>
+        <div className="f">
+          <label className="toggle-row"><input type="checkbox" checked={useDate} onChange={(e) => setUseDate(e.target.checked)} />Only one date</label>
+          {useDate
+            ? <label>Match date<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+            : <label>Recent matches<select value={days} onChange={(e) => setDays(+e.target.value)}>{[[7, 'Last 7 days'], [14, 'Last 14 days'], [30, 'Last 30 days'], [60, 'Last 60 days'], [90, 'Last 90 days']].map(([n, l]) => <option key={n} value={n}>{l}</option>)}</select></label>}
+        </div>
+        <label className="hint">Search team or league (filters the list instantly)<input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && find()} placeholder="e.g. Monza" /></label>
+        <button className="pri" onClick={find}>{useDate ? 'Find matches on this date' : `Find matches of the last ${days} days`}</button>
+        {(() => {
+          const shown = rows.filter((r) => (r.home + ' ' + r.away + ' ' + r.league).toLowerCase().includes(q.trim().toLowerCase()));
+          return <>
+            <div className="mlist">{shown.slice(0, 150).map((r) => <button key={r.id} className="mrow" onClick={() => load(r.id)}><small>{r.date} · {r.league}</small><br />{r.home} {r.gh}-{r.ga} {r.away}</button>)}</div>
+            {rows.length > 0 && <p className="hint">{shown.length} match{shown.length === 1 ? '' : 'es'} shown{shown.length > 150 ? ' (first 150, type more of the name to narrow it down)' : ''}.</p>}
+          </>;
+        })()}
+        <div className="r"><input placeholder="or match ID" value={fid} onChange={(e) => setFid(e.target.value)} style={{ width: 130 }} /><button onClick={() => load(fid)}>Load</button></div>
         <p className="hint">{ist}</p>
       </>}
       {tab === 'kf' && <>
@@ -97,22 +133,206 @@ ${noPhotos(D)}`;
         {kfSub==='moment'&&<><Section title="Timing & view"><div className="f"><label>Match minute<input type="number" step="0.1" value={kf.minute??0} onChange={(e)=>K(f=>{f.minute=+e.target.value;f.manual.modified=true})}/></label><label>View<select value={kf.field} onChange={(e)=>onField(e.target.value)}><option value="full">Full pitch</option><option value="away">Away half</option><option value="home">Home half</option></select></label></div></Section>
         <Section title="Event"><label className="hint">Type<select value={kf.comment?.type||'info'} onChange={(e)=>K(f=>{f.comment={...f.comment,type:e.target.value};f.manual.modified=true})}>{EVENT_TYPES.map(t=> <option key={t}>{t}</option>)}</select></label><label className="hint">Description<textarea className="cm" value={kf.comment?.text||''} onChange={(e)=>K(f=>{f.comment={...f.comment,text:e.target.value};f.manual.modified=true})}/></label><label className="hint">Player involved<select value={kf.actor||''} onChange={(e)=>K(f=>{f.actor=e.target.value||null;f.manual.modified=true})}><option value="">None</option>{['A','B'].flatMap(k=>D.teams[k].players.map((p,i)=> <option key={k+i} value={k+i}>{D.teams[k].name} #{p.n} {p.name}</option>))}</select></label></Section></>}
         {kfSub==='movements'&&<><Section title="Movement inspector"><small className="hint">{kf.generated?'API / generated':'Manual keyframe'}{kf.manual?.modified?' · manually modified':''}</small>{kf.movements?Object.entries(kf.movements).map(([id,m])=>{const p=D.teams[id[0]]?.players[+id.slice(1)];if(!p)return null;const s=movementStats(m.start,m.end,m.duration);return <button className={'mrow '+(se===id?'on':'')} key={id} onClick={()=>setSe(id)}><b>{p.name||`#${p.n}`}</b><small>{id} · {s.distance} m · {s.duration}s · {m.type}</small></button>}):<p className="hint">Movement metadata will appear after editing or playback.</p>}<div className="r"><button onClick={()=>upd(d=>d.kfs.forEach((f,i)=>ensureMovementMeta(f,i?d.kfs[i-1]:null,d)))}>Refresh</button><button onClick={()=>K(f=>{delete f.manual;f.generated={source:'api'}})}>Reset edits</button></div></Section></>}
-        {kfSub==='players'&&<><Section title="Manual substitution"><div className="f"><label>Team<select value={subTeam} onChange={(e)=>{setSubTeam(e.target.value);setSubOut(0);setSubIn(0)}}><option value="A">Home</option><option value="B">Away</option></select></label><label>Outgoing player<select value={subOut} onChange={(e)=>setSubOut(+e.target.value)}>{D.teams[subTeam].players.map((p,i)=> <option key={i} value={i}>OUT · #{p.n||i+1} {p.name||`Player ${i+1}`}</option>)}</select></label><label>Incoming player<select value={subIn} onChange={(e)=>setSubIn(+e.target.value)}>{D.teams[subTeam].players.map((p,i)=> <option key={i} value={i}>IN · #{p.n||i+1} {p.name||`Player ${i+1}`}</option>)}</select></label></div><label className="hint">Substitution duration (seconds)<input type="range" min="0.6" max="5" step="0.1" value={kf.subDuration||2.4} onChange={(e)=>K(f=>{const duration=+e.target.value;f.subDuration=duration;if(f.movements)Object.values(f.movements).forEach(m=>m.duration=duration)})}/><small>{(kf.subDuration||2.4).toFixed(1)} s</small></label>
-<button className="pri" onClick={()=>K(f=>{
-  const out=subTeam+subOut, inPlayer=subTeam+subIn, prev=D.kfs[sel-1];
-  const bench=benchFor(subTeam,f.sw), spot=[...(prev?.[subTeam]?.[subOut]||f[subTeam][subOut])];
-  f.subs=[{o:out,i:inPlayer,k:subTeam}]; f.ev='sub'; f.isolation='substitution'; f.actor=inPlayer; f.subDuration=f.subDuration||2.4;
-  f.field=subField(subTeam); f.hold=null; delete f.ballMovement;   // camera on the half where this team plays
-  f[subTeam][subOut]=[...bench]; f[subTeam][subIn]=[...spot];
-  f.movements={
-    [out]:{start:[...spot],end:[...bench],duration:f.subDuration,type:'benchExit',benchPoint:[...bench]},
-    [inPlayer]:{start:[...bench],end:[...spot],duration:f.subDuration,type:'benchEntry',benchPoint:[...bench]}
-  };
-  f.comment={type:'sub',text:`Substitution: ${D.teams[subTeam].players[subIn]?.name||'#'+D.teams[subTeam].players[subIn]?.n||'Player'} enters for ${D.teams[subTeam].players[subOut]?.name||'#'+D.teams[subTeam].players[subOut]?.n||'Player'}`};
-  f.hidden=[...new Set([...(f.hidden||[]).filter(id=>id!==inPlayer&&id!==out),out])];
-  f.subAfter={incoming:inPlayer,outgoing:out};
-  f.manual={modified:true,source:'manual'};
-})}>Generate substitution paths</button></Section><Section title="Players in this keyframe">{['A','B'].map(team=><div key={team}><small className="hint">{team==='A'?D.teams.A.name:D.teams.B.name}</small>{D.teams[team].players.map((p,i)=>{const id=team+i;const present=kf.hidden?.includes(id)?false:(p.join==='never'?false:true);return <label className="prow row" key={id}><input type="checkbox" checked={present} onChange={(e)=>K(f=>{f.hidden=f.hidden||[];if(e.target.checked)f.hidden=f.hidden.filter(x=>x!==id);else f.hidden=[...new Set([...f.hidden,id])];f.manual={modified:true,source:'manual'}})}/><b>#{p.n}</b><span className="nm">{p.name||`Player ${i+1}`}</span><button onClick={()=>setSe(id)}>Edit</button></label>})}</div>)}<p className="hint">Checked = in this keyframe only. Uncheck a player to remove him from this event/scene. Use Edit to place him, and use the checkbox again to restore him.</p><div className="r"><button onClick={()=>K(f=>{delete f.hidden;f.manual={modified:true,source:'manual'}})}>Show all players</button></div></Section></>}
+
+{kfSub === 'players' && <>
+  <Section title="Manual substitution">
+    <div className="f">
+      <label>Team
+        <select value={subTeam} onChange={(e) => {
+          setSubTeam(e.target.value);
+          setSubOut(0);
+          setSubIn(0);
+        }}>
+          <option value="A">Home</option>
+          <option value="B">Away</option>
+        </select>
+      </label>
+
+      <label>Outgoing player
+        <select value={subOutIndex} onChange={(e) => setSubOut(+e.target.value)}>
+          {subOutgoing.map(({ p, i }) =>
+            <option key={i} value={i}>
+              OUT · #{p.n || i + 1} {p.name || `Player ${i + 1}`}
+            </option>
+          )}
+        </select>
+      </label>
+
+      <label>Incoming player
+        <select value={subInIndex} onChange={(e) => setSubIn(+e.target.value)}>
+          {subIncoming.map(({ p, i }) =>
+            <option key={i} value={i}>
+              IN · #{p.n || i + 1} {p.name || `Player ${i + 1}`}
+            </option>
+          )}
+        </select>
+      </label>
+    </div>
+
+    <label className="hint">
+      Substitution duration (seconds)
+      <input
+        type="range"
+        min="0.6"
+        max="5"
+        step="0.1"
+        value={kf.subDuration || 2.4}
+        onChange={(e) => K(f => {
+          const duration = +e.target.value;
+          f.subDuration = duration;
+          if (f.movements) {
+            Object.values(f.movements).forEach(m => m.duration = duration);
+          }
+        })}
+      />
+      <small>{(kf.subDuration || 2.4).toFixed(1)} s</small>
+    </label>
+
+    <button
+      className="pri"
+      disabled={subOutIndex < 0 || subInIndex < 0 || subOutIndex === subInIndex}
+      onClick={() => {
+        if (subOutIndex < 0 || subInIndex < 0 || subOutIndex === subInIndex) return;
+        K(f => {
+          const out = subTeam + subOutIndex;
+          const inPlayer = subTeam + subInIndex;
+          const prev = D.kfs[sel - 1];
+          const bench = benchFor(subTeam, f.sw);
+          const spot = [...(prev?.[subTeam]?.[subOutIndex] || f[subTeam][subOutIndex])];
+
+          f.subs = [{ o: out, i: inPlayer, k: subTeam }];
+          f.ev = 'sub';
+          f.isolation = 'substitution';
+          f.actor = inPlayer;
+          f.subDuration = f.subDuration || 2.4;
+          f.field = subField(subTeam);
+          f.hold = null;
+          delete f.ballMovement;
+
+          f[subTeam][subOutIndex] = [...bench];
+          f[subTeam][subInIndex] = [...spot];
+
+          f.movements = {
+            [out]: {
+              start: [...spot],
+              end: [...bench],
+              duration: f.subDuration,
+              type: 'benchExit',
+              benchPoint: [...bench]
+            },
+            [inPlayer]: {
+              start: [...bench],
+              end: [...spot],
+              duration: f.subDuration,
+              type: 'benchEntry',
+              benchPoint: [...bench]
+            }
+          };
+
+          f.comment = {
+            type: 'sub',
+            text: `Substitution: ${D.teams[subTeam].players[subInIndex]?.name || '#' + D.teams[subTeam].players[subInIndex]?.n || 'Player'} enters for ${D.teams[subTeam].players[subOutIndex]?.name || '#' + D.teams[subTeam].players[subOutIndex]?.n || 'Player'}`
+          };
+
+          f.hidden = [
+            ...new Set([
+              ...(f.hidden || []).filter(id => id !== inPlayer && id !== out),
+              out
+            ])
+          ];
+
+          f.subAfter = { incoming: inPlayer, outgoing: out };
+          f.manual = { modified: true, source: 'manual' };
+        });
+      }}
+    >
+      Generate substitution paths
+    </button>
+  </Section>
+
+  <Section title="Players on the pitch in this keyframe">
+    {['A', 'B'].map(team => (
+      <div key={team}>
+        <small className="hint">{D.teams[team].name}</small>
+
+        {D.teams[team].players.map((p, i) => {
+          const id = team + i;
+          const on = presence(D, p, kf.t, true) > 0 &&
+            !kf.hidden?.includes(id);
+
+          return (
+            <div className={'prow row' + (se === id ? ' on' : '')} key={id}>
+              <i style={{
+                background: D.teams[team].color,
+                opacity: on ? 1 : 0.3
+              }} />
+
+              <b>#{p.n}</b>
+              <span className="nm">{p.name || `Player ${i + 1}`}</span>
+
+              <button onClick={() => setSe(id)} disabled={!on}>
+                Move
+              </button>
+
+              {on ? (
+                <button className="dng" onClick={() => onLeave(id)}>
+                  Remove
+                </button>
+              ) : (
+                <button className="pri" onClick={() => onJoin(team, i)}>
+                  Add
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    ))}
+
+    <p className="hint">
+      Add = the player appears from this keyframe on, near the ball.
+      Remove = he leaves the pitch from this keyframe.
+      Earlier keyframes are not changed.
+    </p>
+  </Section>
+
+  {se && se !== 'ball' && kf[se[0]]?.[+se.slice(1)] && (
+    <Section title={`Position · ${D.teams[se[0]].players[+se.slice(1)]?.name || '#' + D.teams[se[0]].players[+se.slice(1)]?.n}`}>
+      <div className="f">
+        <label>
+          X (0–68)
+          <input
+            type="number"
+            step="0.5"
+            value={kf[se[0]][+se.slice(1)][0]}
+            onChange={(e) => K(f => {
+              f[se[0]][+se.slice(1)][0] = +e.target.value;
+              f.manual = { modified: true, source: 'manual' };
+            })}
+          />
+        </label>
+
+        <label>
+          Y (0–105)
+          <input
+            type="number"
+            step="0.5"
+            value={kf[se[0]][+se.slice(1)][1]}
+            onChange={(e) => K(f => {
+              f[se[0]][+se.slice(1)][1] = +e.target.value;
+              f.manual = { modified: true, source: 'manual' };
+            })}
+          />
+        </label>
+      </div>
+
+      <p className="hint">
+        You can also click the pitch to move the selected player in this keyframe.
+      </p>
+    </Section>
+  )}
+</>}
+
         {kfSub==='stats'&&<Section title="Score, possession & match statistics"><div className="g4"><span/><span>{D.teams.A.name}</span><span>{D.teams.B.name}</span>{STATS.map(([key,label])=>[<span key={key}>{key==='big'?D.meta.bigLabel||label:label}</span>,<input key={key+'a'} type="number" value={kf.stats?.[key]?.[0]??0} onChange={(e)=>K(f=>{f.stats[key][0]=+e.target.value})}/>,<input key={key+'b'} type="number" value={kf.stats?.[key]?.[1]??0} onChange={(e)=>K(f=>{f.stats[key][1]=+e.target.value})}/>])}</div></Section>}
       </>}
       {tab === 'fo' && <>
@@ -123,7 +343,7 @@ ${noPhotos(D)}`;
       {tab === 'pl' && <>
         <SubTabs items={[['active','Active / bench'],['roster','Full roster']]} value={playerSub} onChange={setPlayerSub}/>
         {playerSub==='active'&&['A','B'].map(k=>{const active=D.teams[k].players.map((p,i)=>({p,i,id:k+i})).filter(({p})=>p.join!== 'never'&&!p.bench);const bench=D.teams[k].players.map((p,i)=>({p,i,id:k+i})).filter(({p})=>p.join==='never'||p.bench);return <Section key={k} title={`${k==='A'?'Home':'Away'} · ${D.teams[k].name}`}><div className="r"><button onClick={()=>setBulk(active.map(x=>x.id))}>Select active</button><button onClick={()=>setBulk(bench.map(x=>x.id))}>Select bench</button><button onClick={()=>setBulk([])}>Clear</button></div><small className="hint">On pitch ({active.length})</small>{active.map(({p,i,id})=><label className="prow row" key={id}><input type="checkbox" checked={bulk.includes(id)} onChange={()=>setBulk(v=>v.includes(id)?v.filter(x=>x!==id):[...v,id])}/><i style={{background:D.teams[k].color}}/><b>#{p.n}</b><span className="nm" onClick={()=>setSe(id)}>{p.name||'Unnamed'}</span></label>)}<small className="hint">Substitution bench ({bench.length})</small>{bench.map(({p,i,id})=><label className="prow row" key={id}><input type="checkbox" checked={bulk.includes(id)} onChange={()=>setBulk(v=>v.includes(id)?v.filter(x=>x!==id):[...v,id])}/><i style={{background:D.teams[k].color}}/><b>#{p.n}</b><span className="nm" onClick={()=>setSe(id)}>{p.name||'Unnamed'}</span></label>)}</Section>})}
-        {playerSub==='active'&&<Section title="Bulk actions"><div className="r"><button className="pri" disabled={!bulk.length} onClick={()=>upd(d=>bulk.forEach(id=>{const p=d.teams[id[0]].players[+id.slice(1)];delete p.join;d.kfs.forEach(f=>{if(!f[id[0]][+id.slice(1)])f[id[0]][+id.slice(1)]=[34,52.5]})}))}>Add to pitch</button><button className="dng" disabled={!bulk.length} onClick={()=>upd(d=>bulk.forEach(id=>d.teams[id[0]].players[+id.slice(1)].join='never'))}>Move to bench</button></div></Section>}
+        {playerSub==='active'&&<Section title="Bulk actions"><div className="r"><button className="pri" disabled={!bulk.length} onClick={()=>bulk.forEach(id=>onJoin(id[0],+id.slice(1)))}>Add selected to this keyframe</button><button className="dng" disabled={!bulk.length} onClick={()=>upd(d=>bulk.forEach(id=>d.teams[id[0]].players[+id.slice(1)].join='never'))}>Move to bench</button></div></Section>}
         {playerSub==='roster'&&<>
         {['A', 'B'].map((k) => { const T = D.teams[k]; return (
           <div className="team" key={k}>
@@ -144,7 +364,7 @@ ${noPhotos(D)}`;
           <small className="hint">On pitch ({active.length})</small>{active.map(({p,i,id})=><label className="prow row" key={id}><input type="checkbox" checked={bulk.includes(id)} onChange={()=>setBulk(v=>v.includes(id)?v.filter(x=>x!==id):[...v,id])}/><i style={{background:D.teams[k].color}}/><b>#{p.n}</b><span className="nm" onClick={()=>setSe(id)}>{p.name||'Unnamed'}</span></label>)}
           <small className="hint">Substitution bench ({bench.length})</small>{bench.map(({p,i,id})=><label className="prow row" key={id}><input type="checkbox" checked={bulk.includes(id)} onChange={()=>setBulk(v=>v.includes(id)?v.filter(x=>x!==id):[...v,id])}/><i style={{background:D.teams[k].color}}/><b>#{p.n}</b><span className="nm" onClick={()=>setSe(id)}>{p.name||'Unnamed'}</span></label>)}
         </div>})}
-        <div className="r"><button className="pri" disabled={!bulk.length} onClick={()=>upd(d=>bulk.forEach(id=>{const p=d.teams[id[0]].players[+id.slice(1)];delete p.join;d.kfs.forEach(f=>{if(!f[id[0]][+id.slice(1)])f[id[0]][+id.slice(1)]=[34,52.5]})}))}>Add selected to pitch</button><button className="dng" disabled={!bulk.length} onClick={()=>upd(d=>bulk.forEach(id=>{d.teams[id[0]].players[+id.slice(1)].join='never'}))}>Move selected to bench</button></div>
+        <div className="r"><button className="pri" disabled={!bulk.length} onClick={()=>bulk.forEach(id=>onJoin(id[0],+id.slice(1)))}>Add selected to this keyframe</button><button className="dng" disabled={!bulk.length} onClick={()=>upd(d=>bulk.forEach(id=>{d.teams[id[0]].players[+id.slice(1)].join='never'}))}>Move selected to bench</button></div>
         </>}
       </>}
       {tab === 'mo' && <>
@@ -167,7 +387,7 @@ ${noPhotos(D)}`;
       </>}
       {tab === 'ev' && <>
         <SubTabs items={[['types','Event types'],['inventory','Event list']]} value={eventSub} onChange={setEventSub}/>
-        {eventSub==='types'?['sub','yellow','red'].map(kind=>{const list=(D.events||[]).filter(e=>kind==='sub'?e.kind==='sub':e.kind==='card'&&(kind==='red'?e.red:!e.red));const on=D.evOn?.[kind]!==false&&!(kind==='yellow'||kind==='red'&&D.evOn?.card===false);const key=kind==='sub'?'sub':'card';return <Section key={kind} title={kind==='sub'?'Substitutions':kind==='yellow'?'Yellow cards':'Red cards'}><label className="hint toggle-row"><input type="checkbox" checked={on} onChange={(e)=>{const m=setEvents(structuredClone(D),key,e.target.checked);upd(d=>setEvents(d,key,e.target.checked));setMsg(m)}}/>Enabled</label><small className="hint">{list.length} event(s) · {D.kfs.filter(f=>kind==='sub'?f.ev==='sub':kind==='yellow'?f.comment?.type==='yellow':f.comment?.type==='red').length} generated keyframes</small></Section>}):<Section title="Match events"><div className="mlist">{(D.events||[]).map((e,i)=>{const names=(e.swaps||[]).map(s=>{const p=D.teams[s.k]?.players[s.i];const o=D.teams[s.k]?.players[s.o];return `${p?.name||'#'+p?.n||'IN'} ↔ ${o?.name||'#'+o?.n||'OUT'}`}).join(', ')||e.text||'Card event';return <button className="mrow" key={e.id||i} onClick={()=>{const i=D.kfs.findIndex(k=>k.evId===e.id||(e.kind==='goal'&&k.comment?.type==='goal'&&k.minute===e.m));if(i>=0&&onSelectKeyframe)onSelectKeyframe(i);else setMsg(`Event at ${e.m}' has no matching keyframe`)}}><b>{e.m}'</b><small>{names}</small></button>})}</div></Section>}
+        {eventSub==='types'?['sub','yellow','red'].map(kind=>{const list=(D.events||[]).filter(e=>kind==='sub'?e.kind==='sub':e.kind==='card'&&(kind==='red'?e.red:!e.red));const on=D.evOn?.[kind]!==false&&!(kind==='yellow'||kind==='red'&&D.evOn?.card===false);const key=kind==='sub'?'sub':'card';return <Section key={kind} title={kind==='sub'?'Substitutions':kind==='yellow'?'Yellow cards':'Red cards'}><label className="hint toggle-row"><input type="checkbox" checked={on} onChange={(e)=>{const m=setEvents(structuredClone(D),key,e.target.checked);upd(d=>setEvents(d,key,e.target.checked));setMsg(m)}}/>Enabled</label><small className="hint">{list.length} event(s) · {D.kfs.filter(f=>kind==='sub'?f.ev==='sub':kind==='yellow'?f.comment?.type==='yellow':f.comment?.type==='red').length} generated keyframes</small></Section>}):<Section title="Match events"><div className="mlist">{(D.events||[]).map((e,i)=>{const names=(e.swaps||[]).map(s=>{const p=D.teams[s.k]?.players[s.i];const o=D.teams[s.k]?.players[s.o];return `${p?.name||'#'+p?.n||'IN'} ↔ ${o?.name||'#'+o?.n||'OUT'}${s.m!=null?` (${s.m}')`:''}`}).join(', ')||e.text||'Card event';return <button className="mrow" key={e.id||i} onClick={()=>{const i=D.kfs.findIndex(k=>k.evId===e.id||(e.kind==='goal'&&k.comment?.type==='goal'&&k.minute===e.m));if(i>=0&&onSelectKeyframe)onSelectKeyframe(i);else setMsg(`Event at ${e.m}' has no matching keyframe`)}}><b>{e.m}'</b><small>{names}</small></button>})}</div></Section>}
       </>}
       {tab === 'ma' && <>
         <SubTabs items={[['teams','Teams'],['display','Display']]} value={matchSub} onChange={setMatchSub}/>

@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import Board from './Board.jsx';
 import Timeline from './Timeline.jsx';
 import SidePanel from './SidePanel.jsx';
-import { demo, mk, bAt, cl } from './engine.js';
-import { ensureMovementMeta } from './simulation.js';
+import { demo, mk, bAt, cl, presence, W, H } from './engine.js';
+import { ensureMovementMeta, ensureRoles, repairSubs } from './simulation.js';
+import { MAX_SECONDS } from './importer.js';
 
 const LS = 'peakkick-studio-v3';
 const newId = (d) => Math.max(0, ...d.kfs.map((k) => k.id ?? 0)) + 1;
@@ -13,7 +14,7 @@ export default function App() {
   const [D, setD] = useState(() => {
     try {
       const s = JSON.parse(localStorage.getItem(LS));
-      return s?.kfs?.[0]?.field ? s : demo();
+      return s?.kfs?.[0]?.field ? repairSubs(s) : ensureRoles(demo());
     } catch {
       return demo();
     }
@@ -69,6 +70,7 @@ export default function App() {
       const n = structuredClone(d);
       fn(n);
 
+      ensureRoles(n);
       n.kfs.forEach((kf, i) => {
         ensureMovementMeta(kf, i ? n.kfs[i - 1] : null, n);
       });
@@ -112,10 +114,26 @@ export default function App() {
       'video/webm;codecs=vp8',
       'video/webm'
     ].find((m) => MediaRecorder.isTypeSupported(m));
+    if (!mt) {
+      return setMsg('This browser does not support WebM recording. Use Chrome or Edge.');
+    }
+
+    const canvas = cv.current;
+    if (!canvas || canvas.width !== W || canvas.height !== H) {
+      return setMsg(`Recording requires a ${W}x${H} canvas.`);
+    }
+
+    const stream = canvas.captureStream(30);
+    const track = stream.getVideoTracks()[0];
+    const settings = track?.getSettings();
+    if (!track || settings?.width !== W || settings?.height !== H) {
+      stream.getTracks().forEach((t) => t.stop());
+      return setMsg(`Recording requires a ${W}x${H} capture stream.`);
+    }
 
     const ch = [];
 
-    const r = new MediaRecorder(cv.current.captureStream(30), {
+    const r = new MediaRecorder(stream, {
       mimeType: mt,
       videoBitsPerSecond: 10e6
     });
@@ -125,15 +143,16 @@ export default function App() {
     r.onstop = () => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(
-        new Blob(ch, { type: 'video/webm' })
+        new Blob(ch, { type: r.mimeType || 'video/webm' })
       );
-      a.download = 'goal_replay.webm';
+      a.download = `goal_replay_${W}x${H}.webm`;
       a.click();
+      stream.getTracks().forEach((t) => t.stop());
 
-      setMsg('Saved goal_replay.webm');
+      setMsg(`Saved ${W}x${H} YouTube Shorts video.`);
     };
 
-    setMsg('Recording… please wait');
+    setMsg(`Recording ${W}x${H} at 30 fps… please wait`);
     r.start();
     setMode('kf');
     play(() => setTimeout(() => r.stop(), 400));
@@ -166,6 +185,10 @@ export default function App() {
     if (n && (t <= c.t || t >= n.t)) {
       return setMsg('No room here. Drag markers apart first.');
     }
+    if (!n && t + 1.2 > MAX_SECONDS &&
+      !window.confirm(`This keyframe will make the replay ${ (t + 1.2).toFixed(1) } s, above the ${MAX_SECONDS} s limit. Add it anyway?`)) {
+      return;
+    }
 
     upd((d) => {
       const nk = {
@@ -191,6 +214,30 @@ export default function App() {
 
     setSel(sel + 1);
     setMode('kf');
+    if (!n && t + 1.2 > MAX_SECONDS) setMsg(`Warning: replay is now ${(t + 1.2).toFixed(1)} s. Use “Fit to ${MAX_SECONDS} s”.`);
+  };
+
+  const fitToLimit = () => {
+    const last = D.kfs.at(-1).t;
+    if (last + 1.2 <= MAX_SECONDS) return setMsg(`Replay already fits within ${MAX_SECONDS} s.`);
+    const gaps = D.kfs.slice(1).map((kf, i) => kf.t - D.kfs[i].t);
+    const minimum = gaps.length * 0.1;
+    const target = MAX_SECONDS - 1.2;
+    if (minimum > target) {
+      return setMsg(`Cannot fit ${D.kfs.length} keyframes within ${MAX_SECONDS} s while keeping 0.1 s minimum gaps.`);
+    }
+    const flexible = Math.max(0, gaps.reduce((sum, gap) => sum + Math.max(0, gap - 0.1), 0));
+    const factor = flexible ? (target - minimum) / flexible : 0;
+    upd((d) => {
+      let t = 0;
+      d.kfs[0].t = 0;
+      gaps.forEach((gap, i) => {
+        const nextGap = Math.max(0.1, Math.floor((0.1 + Math.max(0, gap - 0.1) * factor) * 10 + 1e-7) / 10);
+        t += nextGap;
+        d.kfs[i + 1].t = +t.toFixed(1);
+      });
+    });
+    setMsg(`Keyframe times fitted to ${MAX_SECONDS} s. Half-time and full-time markers remain in sequence.`);
   };
 
   const del = () => {
@@ -324,32 +371,28 @@ export default function App() {
     const P = D.teams[k].players;
 
     if (Number.isInteger(exactIndex) && P[exactIndex]) {
+      const id = k + exactIndex, f0 = D.kfs[sel], label = P[exactIndex].name || '#' + P[exactIndex].n;
+      if (presence(D, P[exactIndex], f0.t, true) > 0 && !f0.hidden?.includes(id)) {
+        setSe(id);
+        return setMsg(`${label} is already on the pitch in this keyframe. Click the pitch to move him.`);
+      }
       upd((d) => {
-        const p = d.teams[k].players[exactIndex];
-        const f = d.kfs[sel];
-
-        delete p.join;
-        delete p.leave;
-
-        f.hidden = (f.hidden || []).filter(
-          (id) => id !== k + exactIndex
-        );
-
-        f[k][exactIndex] = f[k][exactIndex] || [34, 52.5];
-
-        f.manual = {
-          modified: true,
-          source: 'manual'
-        };
+        const p = d.teams[k].players[exactIndex], f = d.kfs[sel], b = bAt(d, f);
+        const half = f.field !== 'full', up = (f.field === 'away') !== !!f.sw;
+        let y = b[1] + (b[1] > 52.5 ? -6 : 6);
+        if (half) y = up ? Math.max(y, 56) : Math.min(y, 49);   // inside the visible half
+        const spot = [+cl(b[0] + 7, 6, 62).toFixed(1), +cl(y, 4, 101).toFixed(1)];
+        const off = (q) => !q || q[1] < 0 || q[1] > 105;        // still parked outside the pitch
+        p.join = f.id; delete p.leave;
+        d.kfs.forEach((x, j) => {
+          x.hidden = (x.hidden || []).filter((h) => h !== id); if (!x.hidden.length) delete x.hidden;
+          if (j > sel && off(x[k][exactIndex])) x[k][exactIndex] = [...spot];
+        });
+        f[k][exactIndex] = spot;
+        f.manual = { modified: true, source: 'manual' };
       });
-
-      setSe(k + exactIndex);
-      setMode('kf');
-
-      setMsg(
-        `${P[exactIndex].name || '#' + P[exactIndex].n} joins the selected keyframe as an active player.`
-      );
-
+      setSe(id); setMode('kf');
+      setMsg(`${label} joins from this keyframe. Click the pitch to place him, then move him in the next keyframes.`);
       return;
     }
 
@@ -375,6 +418,7 @@ export default function App() {
       d.teams[k].players.push({
         n,
         name: '',
+        role: 'MID',
         join: d.kfs[sel].id
       });
 
@@ -389,6 +433,20 @@ export default function App() {
     );
   };
 
+  const leavePitch = (id) => {
+    const k = id[0], i = +id.slice(1), p0 = D.teams[k].players[i], f0 = D.kfs[sel];
+    if (!p0) return;
+    if (!(presence(D, p0, f0.t, true) > 0)) return setMsg('He is not on the pitch in this keyframe.');
+    if (sel === 0 && p0.join == null) return setMsg('He is on the pitch from the start. Pick a later keyframe to remove him from there, or use Delete player to remove him completely.');
+    upd((d) => {
+      const p = d.teams[k].players[i], f = d.kfs[sel];
+      if (p.join === f.id) p.join = 'never'; else p.leave = f.id;   // added here -> back to the bench; otherwise he leaves from here
+      d.kfs.forEach((x, j) => { if (j >= sel && x.hold === id) { x.ball = bAt(d, x); x.hold = null; } }); // the ball is let go
+    });
+    setSe(null);
+    setMsg(`${p0.name || '#' + p0.n} is removed from the pitch from this keyframe.`);
+  };
+
   const importMatch = (nd) => {
     if (
       !confirm(
@@ -397,6 +455,8 @@ export default function App() {
     ) {
       return;
     }
+
+    nd.subFix = 2;
 
     setD(nd);
     setSel(0);
@@ -452,7 +512,7 @@ export default function App() {
 
   return (
     <div id="app">
-      <header className="studio-header">
+      <aside className="controls-panel">
         <h1>PeakKick Replay Studio</h1>
 
         <div className="header-actions">
@@ -471,65 +531,67 @@ export default function App() {
 
           <button onClick={loadDemo}>Load demo</button>
         </div>
-      </header>
+        <span className="hint status-line">{msg}</span>
+      </aside>
 
-      <span className="hint status-line">{msg}</span>
-
-      <div className="workspace">
-        <main className="board-column">
-          <Board
-            {...{
-              D,
-              sel,
-              se,
-              mode,
-              scrubT,
-              pb,
-              ph,
-              cv,
-              onEnd
-            }}
-            onSelect={setSe}
-            onMove={move}
-            onAttach={attach}
-            onMsg={setMsg}
-          />
-
-          <Timeline
-            D={D}
-            sel={sel}
-            mode={mode}
-            tot={tot}
-            phRef={ph}
-            onSel={pick}
-            onTime={setTime}
-            onField={setField}
-            onScrub={(t) => {
-              if (!pb.current.on) {
-                setMode('scrub');
-                setScrubT(t);
-              }
-            }}
-            onAdd={add}
-            onDel={del}
-            onAttach={attach}
-            onJoin={join}
-          />
-        </main>
-
-        <SidePanel
-          D={D}
-          upd={upd}
-          sel={sel}
-          se={se}
-          setSe={setSe}
-          setMsg={setMsg}
-          delPlayer={delPlayer}
-          onField={setField}
-          onImport={importMatch}
-          onSelectKeyframe={pick}
+      <main className="board-column">
+        <Board
+          {...{
+            D,
+            sel,
+            se,
+            mode,
+            scrubT,
+            pb,
+            ph,
+            cv,
+            onEnd
+          }}
+          onSelect={setSe}
+          onMove={move}
+          onAttach={attach}
+          onMsg={setMsg}
         />
-      </div>
+      </main>
+
+      <SidePanel
+        D={D}
+        upd={upd}
+        sel={sel}
+        se={se}
+        setSe={setSe}
+        setMsg={setMsg}
+        delPlayer={delPlayer}
+        onField={setField}
+        onImport={importMatch}
+        onSelectKeyframe={pick}
+        onJoin={join}
+        onLeave={leavePitch}
+      />
+
+      <Timeline
+        D={D}
+        sel={sel}
+        mode={mode}
+        tot={tot}
+        maxSeconds={MAX_SECONDS}
+        phRef={ph}
+        onSel={pick}
+        onTime={setTime}
+        onField={setField}
+        onScrub={(t) => {
+          if (!pb.current.on) {
+            setMode('scrub');
+            setScrubT(t);
+          }
+        }}
+        onAdd={add}
+        onFit={fitToLimit}
+        onDel={del}
+        onAttach={attach}
+        onJoin={join}
+        onLeave={leavePitch}
+      />
     </div>
   );
 }

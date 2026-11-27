@@ -1,14 +1,88 @@
-
-// Real match import (API-Football). Calls go through the Vite dev-server proxy (see vite.config.js).
+// Real match import (PitchAPI). Calls go through the Vite dev-server proxy (see vite.config.js).
 import { cl } from './engine.js';
 import { benchFor, subField } from './simulation.js';
+
 // Passing simulation tuning
-const PASS = {
-  goalPasses: 4,
-  idlePasses: 4,
-  idleGap: 3,
-  dt: 0.9
-};
+export const MAX_SECONDS = 60;
+export const MAX_PLAYER_SPEED = 8;
+export const PRESS_DISTANCE = 0.65;
+const REPLAY_LIMIT = MAX_SECONDS - 1.2;
+const PASS_DEFAULTS = { goalPasses: 5, idlePasses: 4, idleGap: 3, dt: 0.9 };
+
+function replayBudget(evs, htEvs, lastM) {
+  const matchEvents = evs.filter((e) => !htEvs.includes(e));
+  const goals = matchEvents.filter((e) => e.type === 'Goal' && e.detail !== 'Missed Penalty').length;
+  const missed = matchEvents.filter((e) => e.type === 'Goal' && e.detail === 'Missed Penalty').length;
+  const reds = matchEvents.filter((e) => e.type === 'Card' && /red/i.test(e.detail || '')).length;
+  const yellows = matchEvents.filter((e) => e.type === 'Card' && !/red/i.test(e.detail || '')).length;
+  const subs = matchEvents.filter((e) => e.type === 'subst');
+  const fixed = 3.6 + 2.5;
+  let plan = { ...PASS_DEFAULTS };
+
+  const idleCost = (enabled, dt) => {
+    if (!enabled) return 0;
+    let prev = 0, count = 0, cost = 0;
+    matchEvents.forEach((e) => {
+      if (e.m - prev >= plan.idleGap) {
+        count = Math.min(plan.idlePasses, Math.max(3, Math.round((e.m - prev) / 4) + 2));
+        cost += 1.4 + count * dt;
+      }
+      if (e.m > 45 && prev < 45) {
+        if (45 - prev >= plan.idleGap) cost += 1.4 + Math.min(plan.idlePasses, Math.max(3, Math.round((45 - prev) / 4) + 2)) * dt;
+        prev = 45;
+      }
+      prev = Math.max(prev, e.m);
+    });
+    const tail = Math.max(0, lastM - 1 - prev);
+    if (tail >= plan.idleGap) cost += 1.4 + Math.min(plan.idlePasses, Math.max(3, Math.round(tail / 4) + 2)) * dt;
+    return cost;
+  };
+
+  const groupedSubs = (gap) => {
+    let groups = 0, prev = null;
+    matchEvents.forEach((e) => {
+      if (e.type !== 'subst') {
+        prev = null;
+        return;
+      }
+      if (prev == null || e.m - prev > gap) groups++;
+      prev = e.m;
+    });
+    return groups;
+  };
+
+  const eventCost = (p, dt, gap) =>
+    goals * (1.4 + 1.7 + (p + 1) * dt) +
+    missed * 3.4 +
+    reds * 2.9 +
+    yellows * 2.2 +
+    groupedSubs(gap) * 3.2;
+
+  const total = (p, dt, gap, idle) =>
+    fixed + eventCost(p, dt, gap) + idleCost(idle, dt);
+
+  if (total(plan.goalPasses, plan.dt, 0, true) > REPLAY_LIMIT) {
+    plan.idlePasses = 0;
+    plan.idleGap = Infinity;
+  }
+  while (total(plan.goalPasses, plan.dt, 0, false) > REPLAY_LIMIT && plan.goalPasses > 4) {
+    plan.goalPasses--;
+  }
+  while (total(plan.goalPasses, plan.dt, 0, false) > REPLAY_LIMIT && plan.dt > 0.6) {
+    plan.dt = Math.max(0.6, +(plan.dt - 0.1).toFixed(1));
+  }
+  if (total(plan.goalPasses, plan.dt, 0, false) > REPLAY_LIMIT) {
+    for (const gap of [1, 2, 3, 5, 10, Infinity]) {
+      if (total(plan.goalPasses, plan.dt, gap, false) <= REPLAY_LIMIT) {
+        plan.mergeSubGap = gap;
+        break;
+      }
+    }
+  } else {
+    plan.mergeSubGap = 0;
+  }
+  return plan;
+}
 
 const rnd = (i) => {
   const s = Math.sin(i * 127.1) * 43758.5453;
@@ -16,61 +90,353 @@ const rnd = (i) => {
 };
 
 export async function api(path) {
-  const r = await fetch('/api-football' + path);
-  const left = r.headers.get('x-ratelimit-requests-remaining');
+  const r = await fetch('/pitchapi/v1' + path);
   const j = await r.json().catch(() => ({}));
-  const errs = j.errors
-    ? (Array.isArray(j.errors) ? j.errors : Object.values(j.errors))
-    : [];
 
-  if (!r.ok || errs.length) {
+  if (!r.ok || j.error) {
     throw new Error(
-      errs.join(' ') ||
-      `API error ${r.status}. Is API_FOOTBALL_KEY set in .env and the dev server restarted?`
+      j.error
+        ? `${j.error.code}: ${j.error.message}`
+        : `API error ${r.status}. Is PITCHAPI_KEY set in .env and the dev server restarted?`
     );
   }
 
-  return { data: j.response || [], left };
+  return j.data;
 }
 
 export async function listFixtures(date) {
-  const { data, left } = await api('/fixtures?date=' + date);
+  const d = await api('/date/' + date);
 
-  const rows = data
-    .filter((f) => ['FT', 'AET', 'PEN'].includes(f.fixture.status.short))
-    .map((f) => ({
-      id: f.fixture.id,
-      league: `${f.league.name} (${f.league.country})`,
-      home: f.teams.home.name,
-      away: f.teams.away.name,
-      gh: f.goals.home,
-      ga: f.goals.away
-    }));
+  const rows = (d.matches || []).map((m) => ({
+    id: m.id,
+    date: m.date || (m.time_utc || date).slice(0, 10),
+    time: m.time_utc || '',
+    league: m.league?.name || '',
+    home: m.home_team.name,
+    away: m.away_team.name,
+    gh: m.score_home,
+    ga: m.score_away
+  }));
 
-  return { rows, left };
+  return { rows };
 }
 
-export async function loadMatch(id) {
-  // Full match statistics plus first-half and second-half numbers when available.
-  const [fx, ln, ev, st] = await Promise.all([
-    'fixtures?id=',
-    'fixtures/lineups?fixture=',
-    'fixtures/events?fixture=',
-    'fixtures/statistics?half=true&fixture='
-  ].map((p) => api('/' + p + id)));
+// All played matches of the last `days` days, newest first. The API has no team search,
+// so the days are loaded a few at a time and the app filters the list by team name.
+export async function listRecent(days, onProgress) {
+  const day = (i) => new Date(Date.now() - i * 864e5).toISOString().slice(0, 10);
+  const dates = Array.from({ length: days }, (_, i) => day(i));
+  const all = [];
+  let next = 0, done = 0, failed = 0;
 
-  if (!fx.data[0]) throw new Error('Match not found.');
+  const one = async (d) => {
+    for (let a = 0; a < 3; a++) {
+      try {
+        return (await listFixtures(d)).rows;
+      } catch (e) {
+        if (!/RATE_LIMIT/.test(e.message)) break;          // too many requests: wait and try again
+        await new Promise((r) => setTimeout(r, 1500 * (a + 1)));
+      }
+    }
+    failed++;
+    return [];
+  };
 
-  if (ln.data.length < 2) {
-    throw new Error('No lineups for this match yet (the competition may not be covered).');
+  const worker = async () => {
+    while (next < dates.length) {
+      const d = dates[next++];
+      all.push(...(await one(d)));
+      onProgress?.(++done, dates.length);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(5, days) }, worker));
+  all.sort((a, b) => (b.time || b.date).localeCompare(a.time || a.date));
+  return { rows: all, failed };
+}
+
+// ---------- PitchAPI -> the shape buildMatch reads ----------
+
+const num = (s) =>
+  parseFloat(String(s ?? '').replace(',', '.')) || 0;
+
+function toLineup(team, ln) {
+  const st = [...(ln.starters || [])].sort(
+    (a, b) => (a.pitch_y ?? 0) - (b.pitch_y ?? 0)
+  );
+
+  const counts = (ln.formation || '')
+    .split('-')
+    .map(Number)
+    .filter(Boolean);
+
+  const sizes =
+    counts.reduce((a, b) => a + b, 0) === st.length - 1
+      ? [1, ...counts]
+      : null;
+
+  const rowOf = [];
+
+  if (sizes) {
+    let i = 0;
+
+    sizes.forEach((n, r) => {
+      for (let j = 0; j < n; j++) {
+        rowOf[i++] = r + 1;
+      }
+    });
+  } else {
+    let r = 1;
+
+    st.forEach((p, i) => {
+      if (
+        i &&
+        p.pitch_y - st[i - 1].pitch_y > 0.07
+      ) {
+        r++;
+      }
+
+      rowOf[i] = r;
+    });
   }
 
+  const cols = {};
+  const grid = [];
+
+  st.map((_, i) => i)
+    .sort(
+      (a, b) =>
+        rowOf[a] - rowOf[b] ||
+        (st[a].pitch_x ?? 0) - (st[b].pitch_x ?? 0)
+    )
+    .forEach((i) => {
+      cols[rowOf[i]] = (cols[rowOf[i]] || 0) + 1;
+      grid[i] = `${rowOf[i]}:${cols[rowOf[i]]}`;
+    });
+
+  const mkP = (p, g) => ({
+    player: {
+      id: p.player_id,
+      number: p.shirt_number,
+      name: p.name,
+      position: p.position,
+      grid: g
+    }
+  });
+
   return {
-    D: buildMatch(fx.data[0], ln.data, ev.data, st.data),
-    left: st.left
+    team: { id: team.id },
+    formation: ln.formation,
+    startXI: st.map((p, i) => mkP(p, grid[i])),
+    substitutes: (ln.subs || []).map((p) => mkP(p))
   };
 }
 
+function toStats(statsData, home, away) {
+  const periods = statsData?.periods || [];
+
+  const find = (re) =>
+    periods.find((p) => re.test(p.period || ''));
+
+  const all = find(/^all$/i) || periods[0];
+  const p1 = find(/first/i);
+  const p2 = find(/second/i);
+
+  const pick = (period, side) => {
+    const items = (period?.groups || []).flatMap(
+      (g) => g.items || []
+    );
+
+    const v = (keys, titles) =>
+      num(
+        items.find(
+          (i) =>
+            keys.test(i.key || '') ||
+            titles.test(i.title || '')
+        )?.[side]
+      );
+
+    return [
+      {
+        type: 'Ball Possession',
+        value: v(/possess?ion/i, /^ball possession$/i)
+      },
+      {
+        type: 'Total Shots',
+        value: v(/^total_?shots$/i, /^total shots$/i)
+      },
+      {
+        type: 'Shots on Goal',
+        value: v(/^shots_?on_?target$/i, /^shots on target$/i)
+      },
+      {
+        type: 'Corner Kicks',
+        value: v(/^corners?$/i, /^corners?$/i)
+      }
+    ];
+  };
+
+  return [
+    [home, 'home'],
+    [away, 'away']
+  ].map(([team, side]) => ({
+    team: { id: team.id },
+    statistics: pick(all, side),
+    ...(p1 ? { firstHalf: pick(p1, side) } : {}),
+    ...(p2 ? { secondHalf: pick(p2, side) } : {})
+  }));
+}
+
+function toEvents(evData, lineups, home, away, live) {
+  const side = {};
+
+  lineups.forEach((l, k) =>
+    [...l.startXI, ...l.substitutes].forEach(({ player }) => {
+      side[player.id] = k ? away.id : home.id;
+    })
+  );
+
+  const assistOf = (e) =>
+    live?.events?.find(
+      (x) =>
+        String(x.type).toLowerCase() === 'goal' &&
+        x.minute === e.minute &&
+        x.player?.player_id === e.player?.id
+    )?.assist?.player_id;
+
+  const out = [];
+
+  (evData.events || []).forEach((e) => {
+    const t = String(e.event_type || '').toLowerCase();
+
+    const team = {
+      id: side[e.player?.id] ?? e.team_id
+    };
+
+    const base = {
+      time: {
+        elapsed: e.minute,
+        extra: e.minute_added || 0
+      },
+      team,
+      player: { id: e.player?.id }
+    };
+
+    if (t === 'goal') {
+      out.push({
+        ...base,
+        type: 'Goal',
+        detail: e.is_own_goal
+          ? 'Own Goal'
+          : e.is_penalty
+            ? 'Penalty'
+            : 'Normal Goal',
+        assist: { id: assistOf(e) }
+      });
+    } else if (t === 'substitution') {
+      out.push({
+        ...base,
+        type: 'subst',
+        assist: { id: e.sub_in_player?.id }
+      });
+    } else if (t === 'yellowcard') {
+      out.push({
+        ...base,
+        type: 'Card',
+        detail: 'Yellow Card'
+      });
+    } else if (t === 'redcard') {
+      out.push({
+        ...base,
+        type: 'Card',
+        detail: 'Red Card'
+      });
+    }
+  });
+
+  return out;
+}
+
+export async function loadMatch(id) {
+  const [m, ln, ev, st, live] = await Promise.all([
+    api(`/matches/${id}`),
+    api(`/matches/${id}/lineups`),
+    api(`/matches/${id}/events`),
+    api(`/matches/${id}/stats`).catch(() => null),
+    api(`/matches/${id}/live`).catch(() => null)
+  ]);
+
+  if (
+    !ln.home?.starters?.length ||
+    !ln.away?.starters?.length
+  ) {
+    throw new Error('No lineups for this match.');
+  }
+
+  if (
+    ln.home.confirmed === false ||
+    ln.away.confirmed === false
+  ) {
+    throw new Error(
+      'Only a predicted lineup exists: the match has not been played yet.'
+    );
+  }
+
+  console.info(
+    'PitchAPI stat keys:',
+    (st?.periods?.[0]?.groups || []).flatMap(
+      (g) =>
+        (g.items || []).map(
+          (i) => `${i.key} = ${i.title}`
+        )
+    )
+  );
+
+  const fx = {
+    fixture: {
+      id: m.id,
+      date: m.time_utc || m.date,
+      venue: { name: m.stadium || '' }
+    },
+    league: {
+      name: m.league?.name || ''
+    },
+    teams: {
+      home: {
+        id: m.home_team.id,
+        name: m.home_team.name
+      },
+      away: {
+        id: m.away_team.id,
+        name: m.away_team.name
+      }
+    }
+  };
+
+  const lineups = [
+    toLineup(fx.teams.home, ln.home),
+    toLineup(fx.teams.away, ln.away)
+  ];
+
+  const stats = st
+    ? toStats(st, fx.teams.home, fx.teams.away)
+    : [];
+
+  return {
+    D: buildMatch(
+      fx,
+      lineups,
+      toEvents(
+        ev,
+        lineups,
+        fx.teams.home,
+        fx.teams.away,
+        live
+      ),
+      stats
+    )
+  };
+}
 // ---------- conversion: API data -> app project ----------
 
 const lum = (c) => {
@@ -121,6 +487,24 @@ function formation(ln) {
   return pos;
 }
 
+const roleFromLineup = (player, ln, index) => {
+  const position = String(player.position || '').toLowerCase();
+  if (/goal|keeper|^gk$/.test(position)) return 'GK';
+  if (/defen|back|^cb$|^fb$/.test(position)) return 'DEF';
+  if (/forward|strik|wing|^att/.test(position)) return 'FWD';
+  if (/mid/.test(position)) return 'MID';
+
+  const row = +(player.grid || '').split(':')[0];
+  if (row === 1 || index === 0) return 'GK';
+  const lastRow = Math.max(1, ...ln.startXI.map(({ player: p }) => +((p.grid || '').split(':')[0]) || 1));
+  if (row > 1) return row === 2 ? 'DEF' : row === lastRow ? 'FWD' : 'MID';
+
+  const counts = (ln.formation || '').split('-').map(Number).filter(Boolean);
+  if (index <= (counts[0] || 4)) return 'DEF';
+  if (index <= (counts[0] || 4) + (counts[1] || 3)) return 'MID';
+  return index < ln.startXI.length ? 'FWD' : 'MID';
+};
+
 export function buildMatch(fx, lineups, events, stats) {
   const hid = fx.teams.home.id;
 
@@ -156,6 +540,7 @@ export function buildMatch(fx, lineups, events, stats) {
         return {
           n: player.number ?? '',
           name: surname(player.name),
+          role: roleFromLineup(player, ln, i),
           ...(i >= ln.startXI.length
             ? { bench: true, join: 'never' }
             : {})
@@ -272,6 +657,7 @@ export function buildMatch(fx, lineups, events, stats) {
   );
 
   const lastM = Math.max(90, ...evs.map((e) => e.m));
+  const passPlan = replayBudget(evs, htEvs, lastM);
 
   const score = [0, 0];
   const kfs = [];
@@ -389,27 +775,123 @@ export function buildMatch(fx, lineups, events, stats) {
   // +1 = attacks toward y=105.
   const dir = (atk) => ((atk === 'A') !== swapped ? 1 : -1);
 
-  const shift = (pos, atk, dA, dD) => {
+  const playerRole = (k, i) => teams[k].players[i]?.role || (i === gk[k] ? 'GK' : 'MID');
+  const depthOf = (k, q) => dir(k) > 0 ? q[1] : 105 - q[1];
+  const yAtDepth = (k, depth) => dir(k) > 0 ? depth : 105 - depth;
+  const shapeBase = (k, i) => swapped ? flip(base[k][i]) : base[k][i];
+
+  const shift = (pos, atk, dA, dD, ballPos = ball) => {
+    const def = atk === 'A' ? 'B' : 'A';
+    const attackDepth = dir(atk) > 0 ? ballPos[1] : 105 - ballPos[1];
+    const defendDepth = 105 - attackDepth;
+    const attackShift = cl((attackDepth - 52.5) * 0.25, -8, 10) * cl(dA / 14, 0.35, 1);
+    const defendShift = cl((defendDepth - 52.5) * 0.15, -7, 4) * cl(dD / 8, 0.35, 1);
+    const fullback = active[atk]
+      .filter((i) => playerRole(atk, i) === 'DEF' && i !== gk[atk])
+      .sort((a, b) => Math.abs(shapeBase(atk, b)[0] - 34) - Math.abs(shapeBase(atk, a)[0] - 34))[0];
+    const mids = { A: [], B: [] };
     ['A', 'B'].forEach((k) => {
-      const n = L[k].startXI.length;
-
-      pos[k].forEach((q, i) => {
-        if (i === gk[k] || !active[k].includes(i)) return;
-
-        const isAtt = k === atk;
-        const ts = dir(atk) * (isAtt ? dA : dD);
-        const ph = (i % n) / n;
-
-        const st = isAtt
-          ? Math.sin(ph * Math.PI) * 3
-          : -Math.sin(ph * Math.PI) * 1.5;
-
-        q[0] = cl(q[0] + st, 3, 65);
-        q[1] = cl(q[1] + ts, 3, 102);
-      });
+      mids[k] = active[k].filter((i) => playerRole(k, i) === 'MID')
+        .sort((a, b) => depthOf(k, shapeBase(k, a)) - depthOf(k, shapeBase(k, b)));
     });
 
+    ['A', 'B'].forEach((k) => {
+      pos[k].forEach((q, i) => {
+        if (!active[k].includes(i)) return;
+        const role = playerRole(k, i);
+        const home = shapeBase(k, i);
+        const ownDepth = depthOf(k, home);
+        const towardBall = (ballPos[0] - 34) * (k === atk ? 0.22 : 0.34);
+        let depth = ownDepth;
+
+        if (k === atk) {
+          if (role === 'GK') depth = cl(ownDepth, 5, 12);
+          else if (role === 'DEF') {
+            const joins = i === fullback && attackDepth > 64;
+            depth = cl(48 + attackShift * 0.35 + (joins ? 8 : 0), 40, joins ? 60 : 52);
+          } else if (role === 'MID') {
+            depth = cl(ownDepth + attackShift + 7, 54, 78);
+          } else {
+            depth = cl(ownDepth + attackShift + 8, 59, 91);
+          }
+        } else {
+          if (role === 'GK') depth = cl(ownDepth + cl((52.5 - defendDepth) * 0.025, 0, 2), 4, 12);
+          else if (role === 'DEF') depth = cl(ownDepth + defendShift, 12, 50.5);
+          else if (role === 'MID') {
+            const rank = mids[k].indexOf(i);
+            const deep = rank >= 0 && rank < Math.ceil(mids[k].length / 2);
+            depth = deep
+              ? cl(ownDepth + defendShift, 24, 51.5)
+              : cl(Math.max(53, ownDepth + defendShift), 53, 68);
+          } else depth = cl(Math.max(53.5, ownDepth + defendShift), 53.5, 88);
+        }
+
+        const stretch = k === atk ? 1 + cl(dA / 28, 0, 1) * 0.06 : 0.94;
+        q[0] = cl(34 + (home[0] - 34) * stretch + towardBall, 4, 64);
+        q[1] = yAtDepth(k, depth);
+      });
+    });
     return pos;
+  };
+
+  const pressureMoves = (pos, atk, carrierId, receiverId) => {
+    if (!carrierId) return {};
+    const def = atk === 'A' ? 'B' : 'A';
+    const carrier = pos[atk][+carrierId.slice(1)];
+    if (!carrier) return {};
+    const previous = kfs.at(-1);
+    const defenders = active[def].filter((i) => i !== gk[def])
+      .sort((a, b) => Math.hypot(pos[def][a][0] - carrier[0], pos[def][a][1] - carrier[1]) -
+        Math.hypot(pos[def][b][0] - carrier[0], pos[def][b][1] - carrier[1]));
+    const moves = {};
+    const roleDepth = (i, depth) => {
+      const role = playerRole(def, i);
+      if (role === 'FWD') return cl(depth, 53.5, 90);
+      if (role === 'MID') return cl(depth, 20, 80);
+      return cl(depth, 4, 51);
+    };
+    const moveToward = (i, target, type) => {
+      const current = pos[def][i];
+      const start = [...(previous?.[def]?.[i] || current)];
+      const end = [
+        start[0] + (target[0] - start[0]) * PRESS_DISTANCE,
+        start[1] + (target[1] - start[1]) * PRESS_DISTANCE
+      ];
+      end[1] = yAtDepth(def, roleDepth(i, depthOf(def, end)));
+      if (Math.hypot(end[0] - target[0], end[1] - target[1]) >
+        Math.hypot(start[0] - target[0], start[1] - target[1])) {
+        end[0] = start[0];
+        end[1] = start[1];
+      }
+      pos[def][i] = end;
+      moves[P(def, i)] = {
+        start,
+        end: [...end],
+        duration: passPlan.dt,
+        type
+      };
+    };
+
+    if (defenders[0] != null) moveToward(defenders[0], carrier, 'press');
+    if (defenders[1] != null) {
+      const receiver = receiverId && pos[atk][+receiverId.slice(1)] || carrier;
+      moveToward(defenders[1], [(carrier[0] + receiver[0]) / 2, (carrier[1] + receiver[1]) / 2], 'cover');
+    }
+    defenders.slice(2).forEach((i) => {
+      const q = pos[def][i], start = previous?.[def]?.[i] || q;
+      q[0] += (carrier[0] - q[0]) * 0.22;
+      q[1] += (carrier[1] - q[1]) * 0.12;
+      q[1] = yAtDepth(def, roleDepth(i, depthOf(def, q)));
+      moves[P(def, i)] = {
+        start: [...start],
+        end: [...q],
+        duration: passPlan.dt,
+        type: 'compact'
+      };
+    });
+    const keeper = pos[def][gk[def]];
+    if (keeper) keeper[0] = cl(keeper[0] + (carrier[0] - keeper[0]) * 0.18, 27, 41);
+    return moves;
   };
 
   const atkOf = (f) => (f === 'away' ? 'A' : 'B');
@@ -441,11 +923,12 @@ export function buildMatch(fx, lineups, events, stats) {
 
     const atk = atkOf(target);
     const c = midOf(atk);
-    const pos = shift(copy(), atk, 12, 4);
     const d = dir(atk);
+    const bridgeBall = [35.5, d > 0 ? 56.5 : 48.5];
+    const pos = shift(copy(), atk, 12, 4, bridgeBall);
 
     pos[atk][c] = [34, d > 0 ? 55 : 50];
-    ball = [35.5, d > 0 ? 56.5 : 48.5];
+    ball = bridgeBall;
 
     K(1.4, m, target, pos, {
       actor: P(atk, c),
@@ -471,16 +954,8 @@ export function buildMatch(fx, lineups, events, stats) {
     // Select players from deeper midfield to the front.
     // Pass between different players.
 
-    const pool = active[atk]
-      .filter((x) => x !== gk[atk])
-      .sort(
-        (a, b) =>
-          fwd(atk, a) - fwd(atk, b) ||
-          base[atk][a][0] - base[atk][b][0]
-      );
-
-    const cand = pool.slice(-7);
-    const out = [];
+    const pool = active[atk].filter((x) => x !== gk[atk] && x !== avoid &&
+      playerRole(atk, x) !== 'DEF').sort((a, b) => fwd(atk, a) - fwd(atk, b) || base[atk][a][0] - base[atk][b][0]), cand = pool.slice(-7), out = [];
 
     for (let j = 0; j < n; j++) {
       const r = cl(
@@ -565,7 +1040,23 @@ export function buildMatch(fx, lineups, events, stats) {
 
       const id = P(atk, h);
 
+      if (j > 0 && kfs.at(-1)?.[atk]?.[h]) pos[atk][h] = [...kfs.at(-1)[atk][h]];
       pos[atk][h] = vis(atk, pos[atk][h], h);
+      const progress = ids.length > 1 ? j / (ids.length - 1) : 1;
+      const next = ids[j + 1];
+      if (next != null) {
+        const q = pos[atk][next];
+        const depth = cl(depthOf(atk, q) + 4, 54, 86);
+        q[1] = yAtDepth(atk, depth);
+        q[0] = cl(q[0] + (pos[atk][h][0] - q[0]) * 0.12, 4, 64);
+      }
+      active[atk].filter((i) => i !== gk[atk] && i !== h && i !== next &&
+        (playerRole(atk, i) === 'MID' || playerRole(atk, i) === 'FWD'))
+        .slice(0, 2).forEach((i) => {
+          const q = pos[atk][i];
+          q[1] = yAtDepth(atk, cl(depthOf(atk, q) + 3 + progress * 3, 54, 89));
+        });
+      const movements = pressureMoves(pos, atk, id, next == null ? null : P(atk, next));
 
       ball = [
         pos[atk][h][0] + 1,
@@ -573,13 +1064,14 @@ export function buildMatch(fx, lineups, events, stats) {
       ];
 
       K(
-        PASS.dt,
+        passPlan.dt,
         Math.max(curMin, mA + (mB - mA) * u),
         fieldOf(atk),
         pos,
         {
           actor: id,
           hold: id,
+          movements,
           comment: {
             type: j ? 'pass' : 'info',
             text: j
@@ -596,7 +1088,7 @@ export function buildMatch(fx, lineups, events, stats) {
 
     const gap = m1 - prevM;
 
-    if (gap >= PASS.idleGap) {
+    if (gap >= passPlan.idleGap && passPlan.idlePasses > 0) {
       const m0 = prevM + 0.6;
 
       const atk = curField
@@ -614,7 +1106,7 @@ export function buildMatch(fx, lineups, events, stats) {
         atk,
         pickChain(
           atk,
-          cl(Math.round(gap / 4) + 2, 3, PASS.idlePasses),
+          cl(Math.round(gap / 4) + 2, 3, passPlan.idlePasses),
           Math.floor(m0 * 7)
         ),
         m0,
@@ -626,6 +1118,80 @@ export function buildMatch(fx, lineups, events, stats) {
     }
 
     prevM = Math.max(prevM, m1);
+  };
+
+  // ---------- goal build-up: several passes, runners join in the opponent half ----------
+
+  const lerp = (a, b, u) => a + (b - a) * u;
+  const gy = (atk, p) => (dir(atk) > 0 ? p : 105 - p);
+
+  const attackFrame = (atk, o, j, u) => {
+    const def = atk === 'A' ? 'B' : 'A';
+    const uu = Math.min(1, u);
+    const pos = shift(
+      copy(),
+      atk,
+      lerp(10, 28, uu),
+      lerp(4, 12, uu)
+    );
+
+    const put = (id, p, x) => {
+      pos[atk][id] = [cl(x, 6, 62), gy(atk, cl(p, 3, 98))];
+    };
+
+    // Every chain player is on the move:
+    // runs to receiving spot, receives ball, then keeps supporting.
+    o.chain.forEach((c, q) =>
+      put(
+        c,
+        Math.max(
+          54,
+          j < q
+            ? o.ph[q] - 9 * (q - j)
+            : o.ph[q] + 3 * (j - q)
+        ),
+        o.xs[q]
+      )
+    );
+
+    // Two extra attackers join in the opponent half (one each side).
+    o.joiners.forEach((x, q) =>
+      put(x, lerp(54, 86, uu), q ? 52 : 16)
+    );
+
+    // The scorer makes his run into the box.
+    if (o.S != null) {
+      put(
+        o.S,
+        j < o.nh - 1
+          ? lerp(56, 82, j / Math.max(1, o.nh - 1))
+          : [86, 92, 94][Math.min(2, j - (o.nh - 1))],
+        o.sx
+      );
+    } else if (j >= o.nh) {
+      put(
+        o.chain.at(-1),
+        86 + 4 * (j - o.nh),
+        o.xs.at(-1)
+      );
+    }
+
+    // The defending team squeezes toward the ball; keeper follows it.
+    const h = j < o.holders.length
+      ? o.holders[j]
+      : (o.S ?? o.chain.at(-1));
+
+    const bx = pos[atk][h][0];
+
+    pos[def].forEach((q, i) => {
+      if (!active[def].includes(i)) return;
+
+      q[0] = i === gk[def]
+        ? 34 + cl((bx - 34) * 0.3, -6, 6)
+        : cl(q[0] + (bx - q[0]) * 0.25, 3, 65);
+    });
+
+    return { pos };
   };
 
   const who = (e) => {
@@ -772,131 +1338,141 @@ export function buildMatch(fx, lineups, events, stats) {
     if (e.type === 'Goal' && e.detail !== 'Missed Penalty') {
       const og = /own/i.test(e.detail || '');
       const atk = og ? o : k;
-
-      const ai =
-        e.assist?.id != null
-          ? idx[atk][e.assist.id]
-          : undefined;
+      const ai = e.assist?.id != null
+        ? idx[atk][e.assist.id]
+        : undefined;
 
       go(fieldOf(atk), e.m);
-
       const d = dir(atk);
 
-      const assister =
-        ai != null &&
+      const S = !og && i != null && active[atk].includes(i) && i !== gk[atk]
+        ? i
+        : null;
+
+      const assister = ai != null &&
         active[atk].includes(ai) &&
         ai !== gk[atk] &&
-        !(k === atk && ai === i)
+        ai !== S
           ? ai
           : null;
 
       const chain = pickChain(
         atk,
-        PASS.goalPasses,
+        passPlan.goalPasses,
         Math.floor(e.m * 5),
         assister,
-        k === atk ? i : null
+        S
       );
 
-      // Several passes between different players before the goal.
-      emitChain(
-        atk,
+      const nC = chain.length;
+      const cp = copy();
+      const lane = [30, 20, 46, 54, 36, 26];
+      const holders = S != null ? [...chain, S] : chain;
+
+      const o2 = {
         chain,
-        e.m - 1.6,
-        e.m - 0.8,
-        10,
-        24,
-        `${name[atk]} build from the back`
-      );
+        S,
+        holders,
+        nh: holders.length,
+        sx: S != null ? 34 + ((S % 3) - 1) * 6 : 34,
+        joiners: active[atk]
+          .filter((x) => x !== gk[atk] && x !== S && !chain.includes(x) &&
+            (playerRole(atk, x) === 'MID' || playerRole(atk, x) === 'FWD'))
+          .sort((a, b) => fwd(atk, b) - fwd(atk, a))
+          .slice(0, 2),
+        ph: chain.map((_, q) =>
+          lerp(58, 78, nC > 1 ? q / (nC - 1) : 1)
+        ),
+        xs: chain.map((c, q) =>
+          cl(cp[atk][c][0] * 0.35 + lane[(q + c) % lane.length] * 0.65, 8, 60)
+        )
+      };
 
-      const lastP = chain.at(-1);
+      const mA = Math.max(curMin, e.m - 2.4);
+      const mB = e.m - 0.5;
 
-      const sId =
-        i != null
-          ? P(k, i)
-          : P(atk, lastP);
+      holders.forEach((h, j) => {
+        // One keyframe per pass; ball changes owner every time.
+        const fr = attackFrame(
+          atk,
+          o2,
+          j,
+          j / Math.max(1, o2.nh - 1)
+        );
 
-      const rec = shift(copy(), atk, 26, 10);
+        ball = [...fr.pos[atk][h]];
+        const movements = pressureMoves(
+          fr.pos,
+          atk,
+          P(atk, h),
+          j + 1 < holders.length ? P(atk, holders[j + 1]) : null
+        );
 
-      if (i != null) {
-        rec[k][i] = [
-          34 + ((i % 3) - 1) * 5,
-          d > 0 ? 88 : 17
-        ];
-      }
-
-      if (assister != null) {
-        rec[atk][assister] = [
-          50,
-          d > 0 ? 80 : 25
-        ];
-      }
-
-      K(1.0, e.m - 0.35, fieldOf(atk), rec, {
-        actor: sId,
-        hold: sId,
-        comment: {
-          type: 'pass',
-          text: `Pass: ${nm(atk, lastP)} finds ${i != null ? nm(k, i) : nm(atk, lastP)} in the box`
-        }
+        K(
+          passPlan.dt,
+          lerp(mA, mB, j / Math.max(1, o2.nh - 1)),
+          fieldOf(atk),
+          fr.pos,
+          {
+            actor: P(atk, h),
+            hold: P(atk, h),
+            movements,
+            comment: {
+              type: j ? 'pass' : 'info',
+              text: j
+                ? `Pass: ${nm(atk, holders[j - 1])} finds ${nm(atk, h)}${S != null && j === holders.length - 1 ? ' in the box' : ''}`
+                : `${name[atk]} build from the back`
+            }
+          }
+        );
       });
 
-      const sh = shift(copy(), atk, 32, 12);
+      const sId = og
+        ? (i != null ? P(k, i) : P(atk, chain.at(-1)))
+        : P(atk, S ?? chain.at(-1));
 
-      if (i != null) {
-        sh[k][i] = [
-          34 + ((i % 3) - 1) * 5,
-          d > 0 ? 94 : 11
-        ];
-      }
+      const stage = (j) => {
+        const fr = attackFrame(atk, o2, j, 1);
 
-      if (assister != null) {
-        sh[atk][assister] = [
-          50,
-          d > 0 ? 84 : 21
-        ];
-      }
+        if (og && i != null) {
+          fr.pos[k][i] = [
+            34 + ((i % 3) - 1) * 5,
+            d > 0 ? 94 : 11
+          ];
+        }
 
-      K(0.9, e.m - 0.1, fieldOf(atk), sh, {
+        return fr.pos;
+      };
+
+      ball = [34, d > 0 ? 94 : 11];
+
+      const shotPos = stage(o2.nh);
+      const liveCarrier = sId[0] === atk ? sId : P(atk, chain.at(-1));
+      const shotMoves = pressureMoves(shotPos, atk, liveCarrier, null);
+      K(0.9, e.m - 0.1, fieldOf(atk), shotPos, {
         actor: sId,
         hold: sId,
+        movements: shotMoves,
         comment: {
           type: 'shot',
-          text: 'The attack reaches the penalty area'
+          text: 'Shot on goal!'
         }
       });
 
-      const pos = shift(copy(), atk, 34, 14);
-
-      if (!og && i != null) {
-        pos[k][i] = [
-          34 + ((i % 3) - 1) * 5,
-          d > 0 ? 94 : 11
-        ];
-      }
-
-      if (assister != null) {
-        pos[atk][assister] = [
-          50,
-          d > 0 ? 84 : 21
-        ];
-      }
-
       score[atk === 'A' ? 0 : 1]++;
+      ball = d > 0 ? [37, 106.2] : [31, -1.2];
 
-      ball = d > 0
-        ? [37, 106.2]
-        : [31, -1.2];
-
-      K(0.8, e.m, fieldOf(atk), pos, {
+      const goalPos = stage(o2.nh + 1);
+      const goalMoves = pressureMoves(goalPos, atk, liveCarrier, null);
+      K(0.8, e.m, fieldOf(atk), goalPos, {
         actor: sId,
         goalFor: atk,
         og,
-
+        pen: /pen/i.test(e.detail || ''),
+        movements: goalMoves,
         comment: {
           type: 'goal',
-          text:
-            `GOAL! ${pname(k, i)}${og ? ' (own goal)' : ''} scores for ${name[atk]}` +
+          text: `GOAL! ${pname(k, i)}${og ? ' (own goal)' : ''} scores for ${name[atk]}` +
             (ai != null ? `. Assist: ${pname(atk, ai)}` : '')
         }
       });
@@ -968,7 +1544,7 @@ export function buildMatch(fx, lineups, events, stats) {
         text: `${pname(k, i)} (${name[k]}) is shown a ${red ? 'red' : 'yellow'} card`
       });
 
-      K(1.5, e.m, curField, pos, {
+      K(red ? 1.5 : 0.8, e.m, curField, pos, {
         ev: 'card',
         evId: id,
         actor: i != null ? P(k, i) : null,
@@ -983,34 +1559,118 @@ export function buildMatch(fx, lineups, events, stats) {
 
     } else if (e.type === 'subst') {
       const swaps = [e];
-      while (evs[g + 1] && evs[g + 1].type === 'subst' && evs[g + 1].m === e.m && !htEvs.includes(evs[g + 1])) swaps.push(evs[++g]);
-      const pos = copy(), made = [], text = [], mv = [];
+
+      while (
+        evs[g + 1] &&
+        evs[g + 1].type === 'subst' &&
+        (evs[g + 1].m === e.m ||
+          (passPlan.mergeSubGap > 0 && evs[g + 1].m - e.m <= passPlan.mergeSubGap)) &&
+        !htEvs.includes(evs[g + 1])
+      ) {
+        swaps.push(evs[++g]);
+      }
+
+      const pos = copy();
+      const made = [];
+      const text = [];
+      const mv = [];
+
       swaps.forEach((s) => {
-        const [sk, oi] = who(s), ni = idx[sk][s.assist?.id];
+        const [sk, oi] = who(s);
+        const ni = idx[sk][s.assist?.id];
+
         if (oi == null || ni == null) return;
-        const spot = [...pos[sk][oi]];                                               // where the player going off stands; the substitute takes this spot
-        const bench = benchFor(sk, swapped, made.filter((m) => m.k === sk).length);  // own half of that team, correct after the HT swap
-        pos[sk][oi] = [...bench]; pos[sk][ni] = [...spot];
-        base[sk][ni] = toBase(spot); base[sk][oi] = toBase(bench);
-        made.push({ k: sk, o: oi, i: ni }); mv.push({ spot, bench });
+
+        const spot = [...pos[sk][oi]];
+        const bench = benchFor(
+          sk,
+          swapped,
+          made.filter((m) => m.k === sk).length
+        );
+
+        pos[sk][oi] = [...bench];
+        pos[sk][ni] = [...spot];
+
+        base[sk][ni] = toBase(spot);
+        base[sk][oi] = toBase(bench);
+
+        made.push({ k: sk, o: oi, i: ni, m: s.m });
+        mv.push({ spot, bench });
+
         text.push(`${pname(sk, ni)} for ${pname(sk, oi)}`);
       });
+
       if (!made.length) continue;
-      made.forEach((s) => { active[s.k] = active[s.k].map((x) => (x === s.o ? s.i : x)); if (gk[s.k] === s.o) gk[s.k] = s.i; });
-      const id = 's' + evList.length, txt = text.join(', ').slice(0, 110);
-      evList.push({ id, kind: 'sub', m: e.m, h: hh, swaps: made, text: txt });
-      const oneTeam = new Set(made.map((s) => s.k)).size === 1;
-      const kf = K(1.8, e.m, oneTeam ? subField(made[0].k) : 'full', pos, {
-        ev: 'sub', evId: id, subDuration: 1.8, isolation: 'substitution',
-        subAfter: { incoming: P(made[0].k, made[0].i), outgoing: P(made[0].k, made[0].o) },
-        movements: {}, subs: made.map((s) => ({ o: P(s.k, s.o), i: P(s.k, s.i) })),
-        actor: P(made[0].k, made[0].i), comment: { type: 'sub', text: txt }
+
+      made.forEach((s) => {
+        active[s.k] = active[s.k].map((x) => (x === s.o ? s.i : x));
+
+        if (gk[s.k] === s.o) gk[s.k] = s.i;
       });
+
+      const id = 's' + evList.length;
+      const txt = text.join(', ').slice(0, 110);
+
+      evList.push({
+        id,
+        kind: 'sub',
+        m: e.m,
+        h: hh,
+        swaps: made,
+        text: txt
+      });
+
+      const oneTeam = new Set(made.map((s) => s.k)).size === 1;
+
+      const kf = K(
+        1.8,
+        e.m,
+        oneTeam ? subField(made[0].k) : 'full',
+        pos,
+        {
+          ev: 'sub',
+          evId: id,
+          subDuration: 1.8,
+          isolation: 'substitution',
+          subAfter: {
+            incoming: P(made[0].k, made[0].i),
+            outgoing: P(made[0].k, made[0].o)
+          },
+          movements: {},
+          subs: made.map((s) => ({
+            o: P(s.k, s.o),
+            i: P(s.k, s.i),
+            m: s.m
+          })),
+          actor: P(made[0].k, made[0].i),
+          comment: {
+            type: 'sub',
+            text: txt
+          }
+        }
+      );
+
       made.forEach((s, n) => {
         const { spot, bench } = mv[n];
-        kf.movements[P(s.k, s.o)] = { start: [...spot], end: [...bench], duration: 1.8, type: 'benchExit', benchPoint: [...bench] };   // off: spot -> bench
-        kf.movements[P(s.k, s.i)] = { start: [...bench], end: [...spot], duration: 1.8, type: 'benchEntry', benchPoint: [...bench] };  // on: bench -> spot
-        teams[s.k].players[s.o].leave = kf.id; teams[s.k].players[s.i].join = kf.id;
+
+        kf.movements[P(s.k, s.o)] = {
+          start: [...spot],
+          end: [...bench],
+          duration: 1.8,
+          type: 'benchExit',
+          benchPoint: [...bench]
+        };
+
+        kf.movements[P(s.k, s.i)] = {
+          start: [...bench],
+          end: [...spot],
+          duration: 1.8,
+          type: 'benchEntry',
+          benchPoint: [...bench]
+        };
+
+        teams[s.k].players[s.o].leave = kf.id;
+        teams[s.k].players[s.i].join = kf.id;
       });
     }
   }
@@ -1033,6 +1693,94 @@ export function buildMatch(fx, lineups, events, stats) {
       text: `Full time: ${name.A} ${score[0]} - ${score[1]} ${name.B}`
     }
   });
+
+  if (kfs.at(-1).t > REPLAY_LIMIT) {
+    const gaps = kfs.slice(1).map((kf, i) => kf.t - kfs[i].t);
+    const minimum = gaps.length * 0.1;
+    if (minimum > REPLAY_LIMIT) {
+      throw new Error(`Replay has ${kfs.length} keyframes; the 60 s limit cannot preserve 0.1 s gaps.`);
+    }
+    const flexible = Math.max(0.1, gaps.reduce((sum, gap) => sum + gap - 0.1, 0));
+    const factor = Math.max(0, (REPLAY_LIMIT - minimum) / flexible);
+    let t = 0;
+    kfs[0].t = 0;
+    gaps.forEach((gap, i) => {
+      t += Math.max(0.1, +(0.1 + Math.max(0, gap - 0.1) * factor).toFixed(1));
+      kfs[i + 1].t = +t.toFixed(1);
+    });
+    while (kfs.at(-1).t > REPLAY_LIMIT) {
+      const i = gaps.findIndex((_, n) => kfs[n + 1].t - kfs[n].t > 0.1);
+      if (i < 0) break;
+      for (let j = i + 1; j < kfs.length; j++) kfs[j].t = +(kfs[j].t - 0.1).toFixed(1);
+    }
+  }
+
+  const keyframeIndex = new Map(kfs.map((kf, i) => [kf.id, i]));
+  const activeAt = (team, index, frameIndex) => {
+    const player = teams[team].players[index];
+    if (!player || player.join === 'never') return false;
+    const joined = keyframeIndex.get(player.join);
+    const left = keyframeIndex.get(player.leave);
+    return (joined == null || frameIndex > joined) && (left == null || frameIndex < left);
+  };
+
+  for (let n = 1; n < kfs.length; n++) {
+    const prev = kfs[n - 1], kf = kfs[n], duration = kf.t - prev.t;
+    if (duration <= 0 || kf.instant || kf.manual?.modified || kf.isolation === 'substitution' ||
+      kf.ph === 'HT' || kf.ph === 'H2') continue;
+    ['A', 'B'].forEach((team) => {
+      teams[team].players.forEach((player, i) => {
+        if (!activeAt(team, i, n)) return;
+        if (player.role === 'GK' && ['shot', 'goal', 'save'].includes(kf.comment?.type)) return;
+        const start = prev[team][i], end = kf[team][i];
+        if (!start || !end) return;
+        const dx = end[0] - start[0], dy = end[1] - start[1], distance = Math.hypot(dx, dy);
+        const maxDistance = Math.max(0, MAX_PLAYER_SPEED * duration - 0.01);
+        if (distance <= maxDistance) return;
+        const ratio = maxDistance / distance;
+        end[0] = start[0] + dx * ratio;
+        end[1] = start[1] + dy * ratio;
+        const movement = kf.movements?.[`${team}${i}`];
+        if (movement) movement.end = [...end];
+      });
+    });
+
+    if (kf.comment?.type === 'pass' && kf.hold) {
+      const atk = kf.hold[0], def = atk === 'A' ? 'B' : 'A';
+      const direction = (team) => (team === 'A') !== !!kf.sw ? 1 : -1;
+      const depthAt = (team, q) => direction(team) > 0 ? q[1] : 105 - q[1];
+      const yAt = (team, depth) => direction(team) > 0 ? depth : 105 - depth;
+      const carrier = kf[atk][+kf.hold.slice(1)];
+      const candidates = teams[def].players.map((_, i) => i).filter((i) => i !== gk[def] && activeAt(def, i, n))
+        .sort((a, b) => Math.hypot(prev[def][a][0] - carrier[0], prev[def][a][1] - carrier[1]) -
+          Math.hypot(prev[def][b][0] - carrier[0], prev[def][b][1] - carrier[1]));
+      Object.entries(kf.movements || {}).forEach(([id, movement]) => {
+        if (movement.type === 'press' || movement.type === 'cover') delete kf.movements[id];
+      });
+      const retarget = (i, target, type) => {
+        if (i == null) return;
+        const start = [...prev[def][i]], dx = target[0] - start[0], dy = target[1] - start[1];
+        const distance = Math.hypot(dx, dy), max = Math.max(0, MAX_PLAYER_SPEED * duration - 0.01);
+        const ratio = Math.min(PRESS_DISTANCE, max / Math.max(0.001, distance));
+        const end = [start[0] + dx * ratio, start[1] + dy * ratio];
+        const role = playerRole(def, i), depth = depthAt(def, end);
+        const bounded = role === 'FWD' ? cl(depth, 53.5, 90) : role === 'DEF' ? cl(depth, 4, 51) : cl(depth, 20, 80);
+        end[1] = yAt(def, bounded);
+        if (Math.hypot(end[0] - target[0], end[1] - target[1]) >
+          Math.hypot(start[0] - target[0], start[1] - target[1])) {
+          end[0] = start[0];
+          end[1] = start[1];
+        }
+        kf[def][i] = end;
+        kf.movements = kf.movements || {};
+        kf.movements[`${def}${i}`] = { start, end: [...end], duration, type };
+      };
+      const oldCarrier = prev.hold && prev[prev.hold[0]]?.[+prev.hold.slice(1)];
+      const lane = oldCarrier ? [(oldCarrier[0] + carrier[0]) / 2, (oldCarrier[1] + carrier[1]) / 2] : carrier;
+      retarget(candidates[0], carrier, 'press');
+      retarget(candidates[1], lane, 'cover');
+    }
+  }
 
   return {
     meta: {

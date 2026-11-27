@@ -8,11 +8,11 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       proxy: {
-        '/api-football': {
-          target: 'https://v3.football.api-sports.io',
+        '/pitchapi': {
+          target: 'https://api.pitchapi.dev',
           changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/api-football/, ''),
-          headers: { 'x-apisports-key': env.API_FOOTBALL_KEY || '' },
+          rewrite: (p) => p.replace(/^\/pitchapi/, ''),
+          headers: { 'X-API-KEY': env.PITCHAPI_KEY || '' },
         },
       },
     },
